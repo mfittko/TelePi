@@ -1,10 +1,16 @@
-import type { AgentSession } from "@mariozechner/pi-coding-agent";
-import type { CustomMessageEntry, SessionEntry } from "@mariozechner/pi-coding-agent";
+import { closeSync, existsSync, globSync, openSync, readFileSync, readSync, realpathSync, statSync, watchFile, unwatchFile } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
-/**
- * Maximum character length for the text portion of a notification body.
- */
-const MAX_NOTIFICATION_TEXT_LENGTH = 200;
+import type { AgentSession, CustomMessageEntry, SessionEntry } from "@mariozechner/pi-coding-agent";
+
+import { formatNotification, sanitizeNotificationText } from "./bot/session-notification-format.js";
+
+export { formatNotification, sanitizeNotificationText };
+
+type TailBuffer = Buffer<ArrayBufferLike>;
+
+const MAX_SUMMARY_OUTPUT_BYTES = 128 * 1024;
 
 /**
  * Custom message types that are forwarded as Telegram notifications.
@@ -29,119 +35,63 @@ export function isActionableCustomMessageEntry(entry: SessionEntry): entry is Cu
   );
 }
 
-/**
- * Strip content that is not actionable from a remote Telegram client.
- *
- * Removes:
- * - `file://` URIs (local file references)
- * - Absolute local paths (e.g. /home/user/…, /Users/name/…, /tmp/…)
- *
- * Relative paths such as `src/main.ts` are kept as they are descriptive.
- */
-export function sanitizeNotificationText(text: string): string {
-  return text
-    // Remove file:// URIs
-    .replace(/file:\/\/[^\s\)\"'>\]]+/g, "")
-    // Replace common absolute local paths with a placeholder
-    .replace(/\/(home|Users|tmp|workspace|var|usr|private|opt|Applications|System)\/[^\s\)\"\',;\n<>]*/g, "[local path]")
-    .replace(/\s{2,}/g, " ")
-    .trim();
+function getSessionFile(session: AgentSession): string | undefined {
+  const sessionFile = (session as AgentSession & { sessionFile?: unknown }).sessionFile;
+  return typeof sessionFile === "string" && sessionFile.trim() ? sessionFile : undefined;
 }
 
-/**
- * Format a concise Telegram notification text for a custom message entry.
- * Returns an empty string for unknown/unformattable entries.
- */
-export function formatNotification(entry: CustomMessageEntry): string {
-  if (entry.customType === "subagent-notify") {
-    return formatSubagentNotify(entry);
+function splitCompleteLines(buffer: TailBuffer): { lines: string[]; remainder: TailBuffer } {
+  const lines: string[] = [];
+  let start = 0;
+
+  for (let i = 0; i < buffer.length; i++) {
+    if (buffer[i] !== 0x0a) {
+      continue;
+    }
+
+    const line = buffer.subarray(start, i).toString("utf8").trim();
+    if (line) {
+      lines.push(line);
+    }
+    start = i + 1;
   }
-  if (entry.customType === "subagent_control_notice") {
-    return formatControlNotice(entry);
-  }
-  return "";
+
+  return {
+    lines,
+    remainder: start < buffer.length ? (Buffer.from(buffer.subarray(start)) as TailBuffer) : (Buffer.alloc(0) as TailBuffer),
+  };
 }
 
-function getStringDetail(details: unknown, ...keys: string[]): string | undefined {
-  if (!details || typeof details !== "object") {
-    return undefined;
-  }
-  const obj = details as Record<string, unknown>;
-  for (const key of keys) {
-    const val = obj[key];
-    if (typeof val === "string" && val.trim()) {
-      return val.trim();
+function readAppendedEntries(
+  sessionFile: string,
+  start: number,
+  end: number,
+  tailBytes: TailBuffer,
+): { entries: SessionEntry[]; remainder: TailBuffer } {
+  const length = Math.max(0, end - start);
+  const readBytes = (length > 0 ? Buffer.alloc(length) : Buffer.alloc(0)) as TailBuffer;
+
+  if (length > 0) {
+    const fd = openSync(sessionFile, "r");
+    try {
+      readSync(fd, readBytes, 0, length, start);
+    } finally {
+      closeSync(fd);
     }
   }
-  return undefined;
-}
 
-/**
- * Append the LLM-generated content body (the Pi display text) to a header line.
- *
- * The body is sanitized to remove local-only paths before delivery and is
- * truncated to MAX_NOTIFICATION_TEXT_LENGTH characters if necessary.
- */
-function appendBody(header: string, entry: CustomMessageEntry): string {
-  const rawBody = typeof entry.content === "string" ? entry.content.trim() : "";
-  const body = sanitizeNotificationText(rawBody);
-  if (!body) {
-    return header;
-  }
-  const truncated = body.length > MAX_NOTIFICATION_TEXT_LENGTH
-    ? `${body.slice(0, MAX_NOTIFICATION_TEXT_LENGTH)}…`
-    : body;
-  return `${header}\n${truncated}`;
-}
+  const combined = tailBytes.length > 0 ? Buffer.concat([tailBytes, readBytes]) : readBytes;
+  const { lines, remainder } = splitCompleteLines(combined);
+  const entries = lines.flatMap((line) => {
+    try {
+      return [JSON.parse(line) as SessionEntry];
+    } catch (error) {
+      console.error("Failed to parse appended session notification entry:", error);
+      return [];
+    }
+  });
 
-function formatSubagentNotify(entry: CustomMessageEntry): string {
-  const agent = getStringDetail(entry.details, "agent", "agentName", "name");
-  const status = getStringDetail(entry.details, "status", "state");
-  const suffix = agent ? `: ${agent}` : "";
-
-  if (status === "completed" || status === "done" || status === "success") {
-    return appendBody(`✅ Background task completed${suffix}`, entry);
-  }
-  if (status === "failed" || status === "error") {
-    return appendBody(`❌ Background task failed${suffix}`, entry);
-  }
-  if (status === "paused") {
-    return appendBody(`⏸ Background task paused${suffix}`, entry);
-  }
-
-  // Unknown status — use the sanitized content/notice as an inline body.
-  const notice = getStringDetail(entry.details, "notice", "message", "summary");
-  const rawText = typeof entry.content === "string" ? entry.content.trim() : "";
-  const text = sanitizeNotificationText(notice ?? rawText);
-  if (!text) {
-    return `🔔 Subagent notification${suffix}`;
-  }
-  const truncated = text.length > MAX_NOTIFICATION_TEXT_LENGTH
-    ? `${text.slice(0, MAX_NOTIFICATION_TEXT_LENGTH)}…`
-    : text;
-  return `🔔 Subagent notification${suffix}: ${truncated}`;
-}
-
-function formatControlNotice(entry: CustomMessageEntry): string {
-  const agent = getStringDetail(entry.details, "agent", "agentName", "name");
-  const event = getStringDetail(entry.details, "event", "eventType");
-  const suffix = agent ? `: ${agent}` : "";
-
-  if (event?.includes("needs_attention") || event?.includes("needsAttention")) {
-    return appendBody(`⚠️ Subagent needs attention${suffix}`, entry);
-  }
-
-  // For other control notices, use content/notice as an inline body.
-  const notice = getStringDetail(entry.details, "notice", "message", "summary");
-  const rawText = typeof entry.content === "string" ? entry.content.trim() : "";
-  const text = sanitizeNotificationText(notice ?? rawText);
-  if (!text) {
-    return `⚠️ Subagent notice${suffix}`;
-  }
-  const truncated = text.length > MAX_NOTIFICATION_TEXT_LENGTH
-    ? `${text.slice(0, MAX_NOTIFICATION_TEXT_LENGTH)}…`
-    : text;
-  return `⚠️ Subagent notice${suffix}: ${truncated}`;
+  return { entries, remainder };
 }
 
 /**
@@ -152,27 +102,242 @@ function formatControlNotice(entry: CustomMessageEntry): string {
  * live-event pass can retry it. Any error is logged but not re-thrown —
  * delivery is best-effort and must not crash the caller.
  */
+function extractSessionFileFromContent(content: string): string | undefined {
+  const match = content.match(/^Session file:\s*(.+)$/im);
+  return match?.[1]?.trim();
+}
+
+function extractOutputFilesFromContent(content: string): string[] {
+  return [...content.matchAll(/^Output saved to:\s*(.+?)\s*\([^\n]+\)\./gim)]
+    .map((match) => match[1]?.trim())
+    .filter((file): file is string => Boolean(file));
+}
+
+function firstSentence(text: string): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  const match = normalized.match(/^(.+?[.!?])(?:\s|$)/);
+  return (match?.[1] ?? normalized).trim();
+}
+
+function getAsyncRunBaseDir(): string {
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  return path.join(tmpdir(), uid === undefined ? "pi-subagents" : `pi-subagents-uid-${uid}`, "async-subagent-runs");
+}
+
+function isInsidePath(child: string, parent: string): boolean {
+  const relative = path.relative(parent, child);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function getOutputSummaryAllowedRoots(): string[] {
+  const roots = [getAsyncRunBaseDir(), path.join(process.cwd(), "reviews")];
+  return roots.flatMap((root) => {
+    try {
+      return [realpathSync(root)];
+    } catch {
+      return [];
+    }
+  });
+}
+
+function readSafeSummaryOutput(file: string, allowedRoots: string[]): string | undefined {
+  try {
+    if (!existsSync(file)) {
+      return undefined;
+    }
+
+    const realFile = realpathSync(file);
+    if (!allowedRoots.some((root) => isInsidePath(realFile, root))) {
+      return undefined;
+    }
+
+    const stat = statSync(realFile);
+    if (!stat.isFile() || stat.size > MAX_SUMMARY_OUTPUT_BYTES) {
+      return undefined;
+    }
+
+    return readFileSync(realFile, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+function sanitizeOutputSummary(summary: string): string {
+  return sanitizeNotificationText(summary)
+    .replace(/(?:file:\/\/)?\/(?:Users|private|tmp|var|Volumes)\/\S+/g, "[local path]")
+    .replace(/~\/\S+/g, "[local path]")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function summarizeReferencedOutputs(files: string[]): string | undefined {
+  const allowedRoots = getOutputSummaryAllowedRoots();
+  if (allowedRoots.length === 0) {
+    return undefined;
+  }
+
+  const contents = files.flatMap((file) => {
+    const content = readSafeSummaryOutput(file, allowedRoots);
+    return content === undefined ? [] : [content];
+  });
+
+  if (contents.length === 0) {
+    return undefined;
+  }
+
+  const blockerLines = contents.flatMap((content) =>
+    content.split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => /^[-*]\s*Blocker:/i.test(line) || /^Blocker:/i.test(line))
+      .map((line) => line.replace(/^[-*]\s*/, "").replace(/^Blocker:\s*/i, "")),
+  );
+
+  if (blockerLines.length > 0) {
+    return sanitizeOutputSummary(`One blocker remains: ${firstSentence(blockerLines[0])} Everything else reviewed well.`);
+  }
+
+  const failedLines = contents.flatMap((content) =>
+    content.split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => /^[-*]\s*(?:Failed|Failure|Error):/i.test(line))
+      .map((line) => line.replace(/^[-*]\s*/, "")),
+  );
+
+  if (failedLines.length > 0) {
+    return sanitizeOutputSummary(`One issue needs attention: ${firstSentence(failedLines[0].replace(/^[^:]+:\s*/, ""))}`);
+  }
+
+  const noteLines = contents.flatMap((content) =>
+    content.split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => /^[-*]\s*Note:/i.test(line))
+      .map((line) => line.replace(/^[-*]\s*/, "").replace(/^Note:\s*/i, "")),
+  );
+
+  if (noteLines.length > 0) {
+    return sanitizeOutputSummary(`No blockers found. Note: ${firstSentence(noteLines[0])}`);
+  }
+
+  return "No blockers found in the returned reviews.";
+}
+
+function findAsyncStatusForSession(sessionFile: string): { error?: string; state?: string } | undefined {
+  const baseDir = getAsyncRunBaseDir();
+  if (!existsSync(baseDir)) {
+    return undefined;
+  }
+
+  const statusPaths = globSync(path.join(baseDir, "*", "status.json"))
+    .sort((left, right) => {
+      try {
+        return statSync(right).mtimeMs - statSync(left).mtimeMs;
+      } catch {
+        return 0;
+      }
+    });
+
+  for (const statusPath of statusPaths) {
+    try {
+      const status = JSON.parse(readFileSync(statusPath, "utf8")) as {
+        state?: string;
+        error?: string;
+        sessionFile?: string;
+        steps?: Array<{ sessionFile?: string; error?: string; status?: string; modelAttempts?: Array<{ error?: string }> }>;
+      };
+      const matchingStep = status.steps?.find((step) => step.sessionFile === sessionFile);
+      if (status.sessionFile !== sessionFile && !matchingStep) {
+        continue;
+      }
+      return {
+        state: matchingStep?.status ?? status.state,
+        error: matchingStep?.error ?? matchingStep?.modelAttempts?.find((attempt) => attempt.error)?.error ?? status.error,
+      };
+    } catch {
+      // Ignore stale or partially written status files.
+    }
+  }
+
+  return undefined;
+}
+
+function summarizeRuntimeIssue(error: string | undefined): string | undefined {
+  if (!error) {
+    return undefined;
+  }
+
+  if (/server_error|server error/i.test(error)) {
+    return "Runtime issue: agent server error while finalizing.";
+  }
+  if (/websocket/i.test(error)) {
+    return "Runtime issue: connection error while finalizing.";
+  }
+  if (/codex error/i.test(error)) {
+    return "Runtime issue: agent runtime error while finalizing.";
+  }
+
+  return "Runtime issue: agent stopped while finalizing.";
+}
+
+function enrichNotificationEntry(entry: CustomMessageEntry): CustomMessageEntry {
+  if (entry.customType !== "subagent-notify" || typeof entry.content !== "string") {
+    return entry;
+  }
+
+  const childSessionFile = extractSessionFileFromContent(entry.content);
+  if (!childSessionFile) {
+    return entry;
+  }
+
+  const additions: string[] = [];
+  const outputSummary = summarizeReferencedOutputs(extractOutputFilesFromContent(entry.content));
+  if (outputSummary && !entry.content.includes(outputSummary)) {
+    additions.push(`Summary: ${outputSummary}`);
+  }
+
+  const runtimeIssue = summarizeRuntimeIssue(findAsyncStatusForSession(childSessionFile)?.error);
+  if (runtimeIssue && !entry.content.includes(runtimeIssue)) {
+    additions.push(runtimeIssue);
+  }
+
+  if (additions.length === 0) {
+    return entry;
+  }
+
+  return {
+    ...entry,
+    content: `${entry.content.trim()}\n\n${additions.join("\n")}`,
+  };
+}
+
 function tryDeliverEntry(
   entry: CustomMessageEntry,
   isAlreadySeen: (id: string) => boolean,
   markSeen: (id: string) => void,
   send: NotificationSend,
+  inFlight: Set<string>,
 ): void {
-  if (isAlreadySeen(entry.id)) {
+  if (isAlreadySeen(entry.id) || inFlight.has(entry.id)) {
     return;
   }
-  const text = formatNotification(entry);
+
+  const enrichedEntry = enrichNotificationEntry(entry);
+  const text = formatNotification(enrichedEntry);
   if (!text) {
-    // No notification text — mark as seen to avoid repeated attempts.
     markSeen(entry.id);
     return;
   }
-  void send(text).then(
-    () => markSeen(entry.id),
-    (error) => {
-      console.error("Failed to send session notification:", error);
-    },
-  );
+
+  inFlight.add(entry.id);
+  void send(text)
+    .then(
+      () => markSeen(entry.id),
+      (error) => {
+        console.error("Failed to send session notification:", error);
+      },
+    )
+    .finally(() => {
+      inFlight.delete(entry.id);
+    });
 }
 
 /**
@@ -192,16 +357,63 @@ export function createSessionNotificationWatcher(
   isAlreadySeen: (id: string) => boolean,
   markSeen: (id: string) => void,
   send: NotificationSend,
+  sharedInFlight: Set<string> = new Set<string>(),
 ): () => void {
+  const inFlight = sharedInFlight;
+  const sessionFile = getSessionFile(session);
+  let fileOffset = 0;
+  let tailBytes: TailBuffer = Buffer.alloc(0) as TailBuffer;
+
+  const initialFileSize = sessionFile
+    ? (() => {
+        try {
+          return statSync(sessionFile).size;
+        } catch {
+          return 0;
+        }
+      })()
+    : 0;
+
   // Catch-up: deliver any actionable notifications already in the session.
   for (const entry of session.sessionManager.getEntries()) {
     if (isActionableCustomMessageEntry(entry)) {
-      tryDeliverEntry(entry, isAlreadySeen, markSeen, send);
+      tryDeliverEntry(entry, isAlreadySeen, markSeen, send, inFlight);
     }
   }
 
-  // Live watch: deliver future actionable custom messages.
-  return session.subscribe((event) => {
+  fileOffset = initialFileSize;
+
+  const drainFile = sessionFile
+    ? () => {
+        try {
+          const currentSize = statSync(sessionFile).size;
+          if (currentSize < fileOffset) {
+            fileOffset = 0;
+            tailBytes = Buffer.alloc(0) as TailBuffer;
+          }
+
+          const { entries, remainder } = readAppendedEntries(sessionFile, fileOffset, currentSize, tailBytes);
+          fileOffset = currentSize;
+          tailBytes = remainder;
+
+          for (const entry of entries) {
+            if (isActionableCustomMessageEntry(entry)) {
+              tryDeliverEntry(entry, isAlreadySeen, markSeen, send, inFlight);
+            }
+          }
+        } catch (error) {
+          console.error("Failed to read appended session notifications:", error);
+        }
+      }
+    : undefined;
+
+  if (sessionFile && drainFile) {
+    watchFile(sessionFile, { interval: 1000 }, drainFile);
+    drainFile();
+  }
+
+  // Live watch: deliver future actionable custom messages emitted in this process.
+  const unsubscribeSession = session.subscribe((event) => {
     if (event.type !== "message_end") {
       return;
     }
@@ -223,18 +435,20 @@ export function createSessionNotificationWatcher(
       return;
     }
 
-    // Find the corresponding entry in the session manager for a stable ID.
-    // The newest matching entry is at the end of getEntries().
     const entries = session.sessionManager.getEntries();
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i];
       if (entry.type === "custom_message" && (entry as CustomMessageEntry).customType === message.customType) {
-        tryDeliverEntry(entry as CustomMessageEntry, isAlreadySeen, markSeen, send);
+        tryDeliverEntry(entry as CustomMessageEntry, isAlreadySeen, markSeen, send, inFlight);
         return;
       }
     }
 
-    // Fallback: build a synthetic entry when the session entry is not found.
+    if (drainFile) {
+      drainFile();
+      return;
+    }
+
     const fallbackId = `${message.customType}::${message.timestamp ?? Date.now()}`;
     const syntheticEntry: CustomMessageEntry = {
       type: "custom_message",
@@ -246,6 +460,13 @@ export function createSessionNotificationWatcher(
       display: true,
       details: message.details,
     };
-    tryDeliverEntry(syntheticEntry, isAlreadySeen, markSeen, send);
+    tryDeliverEntry(syntheticEntry, isAlreadySeen, markSeen, send, inFlight);
   });
+
+  return () => {
+    unsubscribeSession();
+    if (sessionFile && drainFile) {
+      unwatchFile(sessionFile, drainFile);
+    }
+  };
 }

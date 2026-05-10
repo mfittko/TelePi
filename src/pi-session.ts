@@ -372,6 +372,7 @@ export class PiSessionService {
   private notificationIsAlreadySeen?: (id: string) => boolean;
   private notificationMarkSeen?: (id: string) => void;
   private notificationUnsubscribe?: () => void;
+  private readonly notificationInFlight = new Set<string>();
 
   private constructor(private readonly config: TelePiConfig) {
     this.currentWorkspace = config.workspace;
@@ -884,6 +885,7 @@ export class PiSessionService {
     this.sessionUnsubscribe = undefined;
     this.notificationUnsubscribe?.();
     this.notificationUnsubscribe = undefined;
+    this.notificationInFlight.clear();
     this.handle = undefined;
 
     try {
@@ -900,6 +902,7 @@ export class PiSessionService {
     this.sessionUnsubscribe = undefined;
     this.notificationUnsubscribe?.();
     this.notificationUnsubscribe = undefined;
+    this.notificationInFlight.clear();
 
     const handle = this.handle;
     this.handle = undefined;
@@ -1023,6 +1026,7 @@ export class PiSessionService {
       this.notificationIsAlreadySeen,
       this.notificationMarkSeen,
       this.notificationSend,
+      this.notificationInFlight,
     );
   }
 }
@@ -1036,6 +1040,7 @@ export class PiSessionRegistry {
   private readonly inflight = new Map<string, Promise<PiSessionService>>();
   private readonly generations = new Map<string, number>();
   private bootstrapSessionPath?: string;
+  private bootstrapContextKey?: string;
   private notificationSender?: (context: PiSessionContext, text: string) => Promise<void>;
   private readonly dedupeStore = NotificationDedupeStore.createDefault();
 
@@ -1057,6 +1062,19 @@ export class PiSessionRegistry {
    */
   registerNotificationSender(sender: (context: PiSessionContext, text: string) => Promise<void>): void {
     this.notificationSender = sender;
+  }
+
+  startBootstrapNotificationWatcher(): void {
+    if (!this.bootstrapSessionPath || this.config.telegramAllowedUserIds.length !== 1) {
+      return;
+    }
+
+    const [chatId] = this.config.telegramAllowedUserIds;
+    const context = { chatId };
+    this.bootstrapContextKey = getPiSessionContextKey(context);
+    void this.getOrCreate(context).catch((error) => {
+      console.error("Failed to attach bootstrap session notification watcher:", error);
+    });
   }
 
   has(context: PiSessionContext): boolean {
@@ -1091,7 +1109,8 @@ export class PiSessionRegistry {
     }
 
     const generation = this.bumpGeneration(key);
-    const createPromise = PiSessionService.create(this.createServiceConfig())
+    const usesBootstrapSession = key === this.bootstrapContextKey && Boolean(this.bootstrapSessionPath);
+    const createPromise = PiSessionService.create(this.createServiceConfig(usesBootstrapSession))
       .then((service) => {
         this.inflight.delete(key);
 
@@ -1106,6 +1125,9 @@ export class PiSessionRegistry {
 
         this.services.set(key, service);
         this.attachNotificationWatcher(context, key, service);
+        if (usesBootstrapSession) {
+          this.consumeBootstrapSessionPath();
+        }
         return service;
       })
       .catch((error) => {
@@ -1156,19 +1178,17 @@ export class PiSessionRegistry {
     );
   }
 
-  private createServiceConfig(): TelePiConfig {
-    const initialSessionPath = this.consumeBootstrapSessionPath();
+  private createServiceConfig(useBootstrapSession: boolean): TelePiConfig {
     return {
       ...this.config,
       telegramAllowedUserIdSet: new Set(this.config.telegramAllowedUserIds),
-      piSessionPath: initialSessionPath,
+      piSessionPath: useBootstrapSession ? this.bootstrapSessionPath : undefined,
     };
   }
 
-  private consumeBootstrapSessionPath(): string | undefined {
-    const sessionPath = this.bootstrapSessionPath;
+  private consumeBootstrapSessionPath(): void {
     this.bootstrapSessionPath = undefined;
-    return sessionPath;
+    this.bootstrapContextKey = undefined;
   }
 
   private bumpGeneration(key: string): number {

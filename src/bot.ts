@@ -73,6 +73,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
   sessionRegistry.registerNotificationSender(async (context, text) => {
     await sendTextMessage(bot.api, context, text, { fallbackText: text });
   });
+  sessionRegistry.startBootstrapNotificationWatcher?.();
 
   const chatState = createBotChatState();
 
