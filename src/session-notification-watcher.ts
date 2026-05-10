@@ -2,9 +2,11 @@ import type { AgentSession } from "@mariozechner/pi-coding-agent";
 import type { CustomMessageEntry, SessionEntry } from "@mariozechner/pi-coding-agent";
 
 /**
- * Custom message types that are forwarded as Telegram notifications.
- * Only whitelisted types are sent — ordinary assistant/user/tool messages are never forwarded.
+ * Maximum character length for the text portion of a notification message.
  */
+const MAX_NOTIFICATION_TEXT_LENGTH = 200;
+
+
 export const ACTIONABLE_CUSTOM_TYPES = new Set([
   "subagent-notify",
   "subagent_control_notice",
@@ -70,7 +72,7 @@ function formatSubagentNotify(entry: CustomMessageEntry): string {
 
   const text = notice ?? (typeof entry.content === "string" ? entry.content.trim() : "");
   return text
-    ? `🔔 Subagent notification${suffix}: ${text.slice(0, 200)}`
+    ? `🔔 Subagent notification${suffix}: ${text.slice(0, MAX_NOTIFICATION_TEXT_LENGTH)}`
     : `🔔 Subagent notification${suffix}`;
 }
 
@@ -86,7 +88,7 @@ function formatControlNotice(entry: CustomMessageEntry): string {
 
   const text = notice ?? (typeof entry.content === "string" ? entry.content.trim() : "");
   return text
-    ? `⚠️ Subagent notice${suffix}: ${text.slice(0, 200)}`
+    ? `⚠️ Subagent notice${suffix}: ${text.slice(0, MAX_NOTIFICATION_TEXT_LENGTH)}`
     : `⚠️ Subagent notice${suffix}`;
 }
 
