@@ -77,11 +77,9 @@ describe("sanitizeNotificationText", () => {
 
   it("strips file:// URIs", () => {
     const input = "Report saved to file:///home/user/report.pdf for review.";
-    // file:// URI is removed; whitespace is collapsed to single space
+    // The entire file:// URI (including its path) is removed, then whitespace is collapsed.
     const result = sanitizeNotificationText(input);
-    expect(result).not.toContain("file://");
-    expect(result).toContain("Report saved to");
-    expect(result).toContain("for review.");
+    expect(result).toBe("Report saved to for review.");
   });
 
   it("replaces /home/ absolute paths with placeholder", () => {
