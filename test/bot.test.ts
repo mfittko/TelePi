@@ -523,6 +523,10 @@ function createReactionUpdate(
   };
 }
 
+function createEmojiReactions(...emoji: string[]): Array<{ type: "emoji"; emoji: string }> {
+  return emoji.map((value) => ({ type: "emoji", emoji: value }));
+}
+
 async function nextTick(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
@@ -2429,8 +2433,8 @@ describe("createBot", () => {
 
     await bot.handleUpdate(createReactionUpdate(["👍"]));
     await pending;
-    await bot.handleUpdate(createReactionUpdate(["👎"], { message_reaction: { old_reaction: [{ type: "emoji", emoji: "👍" }] } }));
-    await bot.handleUpdate(createReactionUpdate([], { message_reaction: { old_reaction: [{ type: "emoji", emoji: "👎" }] } }));
+    await bot.handleUpdate(createReactionUpdate(["👎"], { message_reaction: { old_reaction: createEmojiReactions("👍") } }));
+    await bot.handleUpdate(createReactionUpdate([], { message_reaction: { old_reaction: createEmojiReactions("👎") } }));
 
     const confirmedTrueCalls = api.sendMessage.mock.calls.filter((call) => String(call[1]).includes("confirmed true")).length;
     const confirmedFalseCalls = api.sendMessage.mock.calls.filter((call) => String(call[1]).includes("confirmed false")).length;
