@@ -81,7 +81,6 @@ export class NotificationDedupeStore {
     if (!this.dirty) {
       return;
     }
-    this.dirty = false;
 
     // Start from the current on-disk state to preserve contexts not in memory.
     let baseStore: RawStore = {};
@@ -111,6 +110,7 @@ export class NotificationDedupeStore {
         mkdirSync(dir, { recursive: true });
       }
       writeFileSync(this.filePath, JSON.stringify(store), "utf8");
+      this.dirty = false;
     } catch (error) {
       console.error("Failed to persist notification dedupe state:", error);
     }

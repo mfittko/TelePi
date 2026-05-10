@@ -363,7 +363,9 @@ describe("createSessionNotificationWatcher — catch-up", () => {
 
 describe("createSessionNotificationWatcher — file tail robustness", () => {
   it("summarizes referenced output files before sending Telegram notifications", async () => {
-    const dir = mkdtempSync(path.join(process.cwd(), "reviews", "telepi-output-summary-"));
+    const reviewsDir = path.join(process.cwd(), "reviews");
+    mkdirSync(reviewsDir, { recursive: true });
+    const dir = mkdtempSync(path.join(reviewsDir, "telepi-output-summary-"));
     const outputFile = path.join(dir, "review.md");
     writeFileSync(outputFile, "## Review\n- Blocker: bootstrap path can attach to the wrong chat. Fix the reservation.\n- Correct: JSONL tailing works.\n", "utf8");
 
@@ -398,7 +400,9 @@ describe("createSessionNotificationWatcher — file tail robustness", () => {
   });
 
   it("redacts local paths from referenced output summaries", async () => {
-    const dir = mkdtempSync(path.join(process.cwd(), "reviews", "telepi-output-redact-"));
+    const reviewsDir = path.join(process.cwd(), "reviews");
+    mkdirSync(reviewsDir, { recursive: true });
+    const dir = mkdtempSync(path.join(reviewsDir, "telepi-output-redact-"));
     const outputFile = path.join(dir, "review.md");
     writeFileSync(outputFile, "## Review\n- Blocker: inspect /Users/example/project/secret.txt before merging.\n", "utf8");
 

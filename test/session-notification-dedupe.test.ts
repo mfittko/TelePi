@@ -109,6 +109,26 @@ describe("NotificationDedupeStore", () => {
     expect(raw["ctx-1"]).toContain("entry-a");
   });
 
+  it("keeps pending changes dirty when a flush fails", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "telepi-dedupe-test-"));
+    dirs.push(dir);
+    const blockedParent = path.join(dir, "blocked-parent");
+    const filePath = path.join(blockedParent, "dedupe.json");
+    writeFileSync(blockedParent, "not a directory", "utf8");
+    const store = new NotificationDedupeStore(filePath);
+
+    store.add("ctx-1", "entry-a");
+    store.flush();
+    expect(existsSync(filePath)).toBe(false);
+
+    rmSync(blockedParent, { force: true });
+    store.flush();
+
+    expect(existsSync(filePath)).toBe(true);
+    const raw = JSON.parse(readFileSync(filePath, "utf8"));
+    expect(raw["ctx-1"]).toContain("entry-a");
+  });
+
   it("createDefault returns a store with the expected file path", () => {
     const store = NotificationDedupeStore.createDefault();
     expect(store).toBeInstanceOf(NotificationDedupeStore);
