@@ -1065,11 +1065,11 @@ export class PiSessionRegistry {
   }
 
   startBootstrapNotificationWatcher(): void {
-    if (!this.bootstrapSessionPath || this.config.telegramAllowedUserIds.length !== 1) {
+    if (!this.bootstrapSessionPath || this.config.telegramAllowedUserIdSet.size !== 1) {
       return;
     }
 
-    const [chatId] = this.config.telegramAllowedUserIds;
+    const [chatId] = this.config.telegramAllowedUserIdSet;
     const context = { chatId };
     this.bootstrapContextKey = getPiSessionContextKey(context);
     void this.getOrCreate(context).catch((error) => {

@@ -94,14 +94,6 @@ function readAppendedEntries(
   return { entries, remainder };
 }
 
-/**
- * Attempt to deliver a single notification entry.
- *
- * `markSeen` is called only after `send` resolves successfully. If delivery
- * fails the entry is intentionally left un-marked so the next catch-up or
- * live-event pass can retry it. Any error is logged but not re-thrown —
- * delivery is best-effort and must not crash the caller.
- */
 function extractSessionFileFromContent(content: string): string | undefined {
   const match = content.match(/^Session file:\s*(.+)$/im);
   return match?.[1]?.trim();
@@ -312,6 +304,14 @@ function enrichNotificationEntry(entry: CustomMessageEntry): CustomMessageEntry 
   };
 }
 
+/**
+ * Attempt to deliver a single notification entry.
+ *
+ * `markSeen` is called only after `send` resolves successfully. If delivery
+ * fails the entry is intentionally left un-marked so the next catch-up,
+ * retry timer, or live-event pass can retry it. Any error is logged but not
+ * re-thrown — delivery is best-effort and must not crash the caller.
+ */
 function tryDeliverEntry(
   entry: CustomMessageEntry,
   isAlreadySeen: (id: string) => boolean,

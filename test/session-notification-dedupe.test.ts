@@ -138,6 +138,19 @@ describe("NotificationDedupeStore", () => {
     store.dispose();
   });
 
+  it("ignores additions after disposal", () => {
+    const { store, filePath } = track(makeTempStore());
+    store.add("ctx-1", "entry-a");
+    store.dispose();
+
+    store.add("ctx-1", "entry-b");
+    store.flush();
+
+    const raw = JSON.parse(readFileSync(filePath, "utf8"));
+    expect(raw["ctx-1"]).toContain("entry-a");
+    expect(raw["ctx-1"]).not.toContain("entry-b");
+  });
+
   it("bounds in-memory dedupe entries per context", () => {
     const { store } = track(makeTempStore());
 

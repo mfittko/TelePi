@@ -39,6 +39,7 @@ export class NotificationDedupeStore {
   private readonly inMemory = new Map<string, Set<string>>();
   private flushTimer: ReturnType<typeof setTimeout> | undefined;
   private dirty = false;
+  private disposed = false;
 
   constructor(private readonly filePath: string) {}
 
@@ -67,6 +68,10 @@ export class NotificationDedupeStore {
    * Schedules a background flush to persist the update.
    */
   add(contextKey: string, id: string): void {
+    if (this.disposed) {
+      return;
+    }
+
     const set = this.getSet(contextKey);
     if (set.has(id)) {
       return;
@@ -131,6 +136,7 @@ export class NotificationDedupeStore {
    * Cancel any pending flush and do a final synchronous flush.
    */
   dispose(): void {
+    this.disposed = true;
     if (this.flushTimer !== undefined) {
       clearTimeout(this.flushTimer);
       this.flushTimer = undefined;
@@ -170,7 +176,7 @@ export class NotificationDedupeStore {
   }
 
   private scheduleFlush(): void {
-    if (this.flushTimer !== undefined) {
+    if (this.disposed || this.flushTimer !== undefined) {
       return;
     }
     this.flushTimer = setTimeout(() => {

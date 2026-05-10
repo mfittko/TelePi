@@ -2027,6 +2027,19 @@ describe("PiSessionService", () => {
     expect(mockState.SessionManager.open).toHaveBeenCalledWith("/sessions/bootstrap.jsonl", undefined, "/workspace/base");
   });
 
+  it("starts bootstrap watcher when duplicate allowed-user IDs resolve to one user", async () => {
+    const registry = await PiSessionRegistry.create(createConfig({
+      telegramAllowedUserIds: [123, 123],
+      telegramAllowedUserIdSet: new Set([123]),
+      piSessionPath: "/sessions/bootstrap.jsonl",
+    }));
+
+    registry.startBootstrapNotificationWatcher();
+    await registry.getOrCreate({ chatId: 123 });
+
+    expect(mockState.SessionManager.open).toHaveBeenCalledWith("/sessions/bootstrap.jsonl", undefined, "/workspace/base");
+  });
+
   it("retries bootstrap session startup without consuming the configured path on failure", async () => {
     const registry = await PiSessionRegistry.create(createConfig({ piSessionPath: "/sessions/bootstrap.jsonl" }));
     mockState.createAgentSessionRuntime.mockRejectedValueOnce(new Error("bootstrap failed"));
