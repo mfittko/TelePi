@@ -1,4 +1,4 @@
-import { closeSync, existsSync, globSync, openSync, readFileSync, readSync, realpathSync, statSync, watchFile, unwatchFile } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync, watchFile, unwatchFile } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -227,7 +227,10 @@ function findAsyncStatusForSession(sessionFile: string): { error?: string; state
     return undefined;
   }
 
-  const statusPaths = globSync(path.join(baseDir, "*", "status.json"))
+  const statusPaths = readdirSync(baseDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(baseDir, entry.name, "status.json"))
+    .filter((statusPath) => existsSync(statusPath))
     .sort((left, right) => {
       try {
         return statSync(right).mtimeMs - statSync(left).mtimeMs;

@@ -62,6 +62,7 @@ export class NotificationDedupeStore {
       return;
     }
     set.add(id);
+    this.trimSet(set);
     this.dirty = true;
     this.scheduleFlush();
   }
@@ -142,9 +143,19 @@ export class NotificationDedupeStore {
       const raw = readFileSync(this.filePath, "utf8");
       const store = JSON.parse(raw) as RawStore;
       const ids = Array.isArray(store[contextKey]) ? store[contextKey] : [];
-      return new Set(ids);
+      return new Set(ids.slice(-MAX_KEYS_PER_CONTEXT));
     } catch {
       return new Set();
+    }
+  }
+
+  private trimSet(set: Set<string>): void {
+    while (set.size > MAX_KEYS_PER_CONTEXT) {
+      const oldest = set.values().next().value as string | undefined;
+      if (oldest === undefined) {
+        return;
+      }
+      set.delete(oldest);
     }
   }
 

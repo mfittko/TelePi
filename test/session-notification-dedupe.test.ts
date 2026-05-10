@@ -5,6 +5,8 @@ import path from "node:path";
 
 import { NotificationDedupeStore } from "../src/session-notification-dedupe.js";
 
+const MAX_KEYS_PER_CONTEXT = 1000;
+
 function makeTempStore(): { store: NotificationDedupeStore; filePath: string; dir: string } {
   const dir = mkdtempSync(path.join(tmpdir(), "telepi-dedupe-test-"));
   const filePath = path.join(dir, "dedupe.json");
@@ -134,6 +136,37 @@ describe("NotificationDedupeStore", () => {
     expect(store).toBeInstanceOf(NotificationDedupeStore);
     // Dispose immediately — no file should be written.
     store.dispose();
+  });
+
+  it("bounds in-memory dedupe entries per context", () => {
+    const { store } = track(makeTempStore());
+
+    for (let i = 0; i < MAX_KEYS_PER_CONTEXT + 2; i += 1) {
+      store.add("ctx-1", `entry-${i}`);
+    }
+
+    expect(store.has("ctx-1", "entry-0")).toBe(false);
+    expect(store.has("ctx-1", "entry-1")).toBe(false);
+    expect(store.has("ctx-1", "entry-2")).toBe(true);
+    expect(store.has("ctx-1", `entry-${MAX_KEYS_PER_CONTEXT + 1}`)).toBe(true);
+  });
+
+  it("loads only the newest bounded entries from disk", () => {
+    const { filePath } = track(makeTempStore());
+    writeFileSync(
+      filePath,
+      JSON.stringify({
+        "ctx-1": Array.from({ length: MAX_KEYS_PER_CONTEXT + 2 }, (_value, index) => `entry-${index}`),
+      }),
+      "utf8",
+    );
+
+    const store = new NotificationDedupeStore(filePath);
+
+    expect(store.has("ctx-1", "entry-0")).toBe(false);
+    expect(store.has("ctx-1", "entry-1")).toBe(false);
+    expect(store.has("ctx-1", "entry-2")).toBe(true);
+    expect(store.has("ctx-1", `entry-${MAX_KEYS_PER_CONTEXT + 1}`)).toBe(true);
   });
 
   it("flush preserves on-disk context keys not loaded in the current instance", () => {
