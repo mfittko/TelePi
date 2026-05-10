@@ -334,6 +334,7 @@ function createMockPiSessionRegistry(options: SetupOptions = {}) {
     }),
     dispose: vi.fn(),
     registerNotificationSender: vi.fn(),
+    startBootstrapNotificationWatcher: vi.fn(),
   } satisfies Partial<PiSessionRegistry>;
 
   return {
@@ -626,6 +627,12 @@ describe("createBot", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("starts the bootstrap notification watcher at bot startup", () => {
+    const { registry } = setupBot();
+
+    expect(registry.registry.startBootstrapNotificationWatcher).toHaveBeenCalledTimes(1);
   });
 
   it("allows authorized users through the middleware and handles /start", async () => {
