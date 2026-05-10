@@ -153,6 +153,4 @@ describe("NotificationDedupeStore", () => {
     expect(raw["ctx-1"]).toContain("entry-a");
     expect(raw["ctx-1"]).toContain("entry-b");
   });
-
-
 });

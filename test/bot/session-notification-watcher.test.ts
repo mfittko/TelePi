@@ -384,10 +384,6 @@ describe("formatNotification — subagent_control_notice", () => {
 // createSessionNotificationWatcher — catch-up
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// createSessionNotificationWatcher — catch-up
-// ---------------------------------------------------------------------------
-
 describe("createSessionNotificationWatcher — catch-up", () => {
   it("sends notifications for existing actionable entries not yet seen", async () => {
     const entry = makeCustomMessageEntry("subagent-notify", true, { status: "completed", agent: "a1" });
