@@ -59,9 +59,28 @@ import { getVoiceBackendStatus, transcribeAudio } from "./voice.js";
 const EDIT_DEBOUNCE_MS = 1500;
 const TYPING_INTERVAL_MS = 4500;
 const EXTENSION_UI_TIMEOUT_MS = 60_000;
+const THUMBS_UP_REACTIONS = new Set(["👍", "👍🏻", "👍🏼", "👍🏽", "👍🏾", "👍🏿"]);
+const THUMBS_DOWN_REACTIONS = new Set(["👎", "👎🏻", "👎🏼", "👎🏽", "👎🏾", "👎🏿"]);
 
 type TelegramChatId = number | string;
 type ContextKey = string;
+type ReactionAnswer = "yes" | "no";
+
+function getYesNoReactionAnswer(ctx: Context): ReactionAnswer | undefined {
+  const reactions = ctx.messageReaction?.new_reaction ?? [];
+  for (const reaction of reactions) {
+    if (reaction.type !== "emoji") {
+      continue;
+    }
+    if (THUMBS_UP_REACTIONS.has(reaction.emoji)) {
+      return "yes";
+    }
+    if (THUMBS_DOWN_REACTIONS.has(reaction.emoji)) {
+      return "no";
+    }
+  }
+  return undefined;
+}
 
 export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegistry): Bot<Context> {
   const bot = new Bot<Context>(config.telegramBotToken);
@@ -309,6 +328,8 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     if (!fromId || !config.telegramAllowedUserIdSet.has(fromId)) {
       if (ctx.callbackQuery) {
         await ctx.answerCallbackQuery({ text: "Unauthorized" }).catch(() => {});
+      } else if (ctx.messageReaction) {
+        return;
       } else if (ctx.chat) {
         await safeReply(ctx, escapeHTML("Unauthorized"), { fallbackText: "Unauthorized" });
       }
@@ -662,6 +683,25 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     );
     await ctx.answerCallbackQuery({ text: result.callbackText });
     await result.afterAnswer?.();
+  });
+
+  bot.on("message_reaction", async (ctx) => {
+    const reactionAnswer = getYesNoReactionAnswer(ctx);
+    if (!reactionAnswer) {
+      return;
+    }
+
+    const reaction = ctx.messageReaction;
+    if (!reaction) {
+      return;
+    }
+
+    const result = await extensionDialogs.resolveConfirmByMessage(
+      reaction.chat.id,
+      reaction.message_id,
+      reactionAnswer === "yes",
+    );
+    await result?.afterAnswer?.();
   });
 
   handlePageCallback(/^switch_page_(\d+)$/, "switch", pendingSessionButtons, "Expired, run /sessions again");
