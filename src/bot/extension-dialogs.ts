@@ -8,6 +8,7 @@ export type PendingExtensionDialog =
   | {
       kind: "select";
       dialogId: string;
+      target: PiSessionContext;
       messageId: number;
       title: string;
       options: string[];
@@ -18,6 +19,7 @@ export type PendingExtensionDialog =
   | {
       kind: "confirm";
       dialogId: string;
+      target: PiSessionContext;
       messageId: number;
       title: string;
       message: string;
@@ -28,6 +30,7 @@ export type PendingExtensionDialog =
   | {
       kind: "input";
       dialogId: string;
+      target: PiSessionContext;
       messageId: number;
       title: string;
       placeholder?: string;
@@ -76,6 +79,11 @@ export interface ExtensionDialogManager {
     messageId: number | undefined,
     confirmed: boolean,
   ): Promise<DialogCallbackResult>;
+  resolveConfirmByMessage(
+    chatId: number | string,
+    messageId: number,
+    confirmed: boolean,
+  ): Promise<DialogCallbackResult | undefined>;
   resolveCancel(
     target: PiSessionContext,
     dialogId: string,
@@ -207,6 +215,7 @@ export function createExtensionDialogManager(deps: {
         const pendingDialog: PendingExtensionDialog = {
           kind: "select",
           dialogId,
+          target,
           messageId: message.message_id,
           title,
           options,
@@ -247,6 +256,7 @@ export function createExtensionDialogManager(deps: {
         const pendingDialog: PendingExtensionDialog = {
           kind: "confirm",
           dialogId,
+          target,
           messageId: telegramMessage.message_id,
           title,
           message,
@@ -292,6 +302,7 @@ export function createExtensionDialogManager(deps: {
         const pendingDialog: PendingExtensionDialog = {
           kind: "input",
           dialogId,
+          target,
           messageId: telegramMessage.message_id,
           title,
           placeholder,
@@ -394,6 +405,36 @@ export function createExtensionDialogManager(deps: {
           }
         },
       };
+    },
+
+    async resolveConfirmByMessage(chatId, messageId, confirmed) {
+      for (const [contextKey, pendingDialog] of pendingDialogs.entries()) {
+        if (pendingDialog.kind !== "confirm" || pendingDialog.messageId !== messageId) {
+          continue;
+        }
+
+        if (pendingDialog.target.chatId !== chatId) {
+          continue;
+        }
+
+        clearPending(contextKey);
+        return {
+          callbackText: confirmed ? "Confirmed" : "Cancelled",
+          afterAnswer: async () => {
+            try {
+              await finalizePending(
+                pendingDialog.target,
+                pendingDialog,
+                renderDialogPanel(pendingDialog.title, [confirmed ? "Confirmed." : "Cancelled."], confirmed ? "✅" : "⛔"),
+              );
+            } finally {
+              pendingDialog.resolve(confirmed);
+            }
+          },
+        };
+      }
+
+      return undefined;
     },
 
     async resolveCancel(target, dialogId, messageId) {

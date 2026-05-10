@@ -49,6 +49,8 @@ type SwitchResult = Awaited<ReturnType<PiSessionService["switchSession"]>>;
 
 const ALLOWED_USER_ID = 123;
 const ALLOWED_CHAT_ID = 456;
+const THUMBS_UP_VARIANTS = ["👍", "👍🏻", "👍🏼", "👍🏽", "👍🏾", "👍🏿"];
+const THUMBS_DOWN_VARIANTS = ["👎", "👎🏻", "👎🏼", "👎🏽", "👎🏾", "👎🏿"];
 
 function makeTreeNode(
   entry: Record<string, any>,
@@ -501,6 +503,26 @@ function createCallbackUpdate(data: string, overrides: Record<string, any> = {})
   };
 }
 
+function createReactionUpdate(
+  newReaction: string[],
+  overrides: Record<string, any> = {},
+): any {
+  const { message_reaction: reactionOverrides = {}, ...updateOverrides } = overrides;
+  return {
+    update_id: Math.floor(Math.random() * 1_000_000),
+    ...updateOverrides,
+    message_reaction: {
+      chat: { id: ALLOWED_CHAT_ID, type: "private" },
+      message_id: 1,
+      user: { id: ALLOWED_USER_ID, is_bot: false, first_name: "Test" },
+      date: Math.floor(Date.now() / 1000),
+      old_reaction: [],
+      new_reaction: newReaction.map((emoji) => ({ type: "emoji", emoji })),
+      ...reactionOverrides,
+    },
+  };
+}
+
 async function nextTick(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
@@ -767,6 +789,21 @@ describe("createBot", () => {
 
     expect(api.answerCallbackQuery).toHaveBeenCalledWith("cb_1", { text: "Unauthorized" });
     expect(api.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("ignores unauthorized reactions without sending chat noise", async () => {
+    const { bot, api } = setupBot();
+
+    await bot.handleUpdate(
+      createReactionUpdate(["👍"], {
+        message_reaction: {
+          user: { id: 999, is_bot: false, first_name: "Eve" },
+        },
+      }),
+    );
+
+    expect(api.sendMessage).not.toHaveBeenCalled();
+    expect(api.answerCallbackQuery).not.toHaveBeenCalled();
   });
 
   it("rejects unauthorized tree commands", async () => {
@@ -2339,6 +2376,174 @@ describe("createBot", () => {
     await pending;
 
     expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("confirmed true"))).toBe(true);
+  });
+
+  it("supports thumbs-up/down reaction variants for extension confirm dialogs", async () => {
+    for (const [emoji, expected] of [
+      ...THUMBS_UP_VARIANTS.map((value) => [value, true] as const),
+      ...THUMBS_DOWN_VARIANTS.map((value) => [value, false] as const),
+    ]) {
+      const { bot, pi, api } = setupBot({
+        piSessionOverrides: {
+          listSlashCommands: vi.fn().mockResolvedValue([
+            { name: "confirm", description: "Confirm action", source: "extension", path: "/ext/confirm.ts" },
+          ]),
+        },
+      });
+
+      const promptMock = pi.service.prompt as ReturnType<typeof vi.fn>;
+      promptMock.mockImplementation(async () => {
+        const confirmed = await pi.getExtensionBindings()?.uiContext?.confirm("Confirm deploy", "Ship it?");
+        pi.emitTextDelta(`confirmed ${confirmed}`);
+        pi.emitAgentEnd();
+      });
+
+      const pending = bot.handleUpdate(createTestUpdate({ message: { text: "/confirm" } }));
+      await nextTick();
+
+      await bot.handleUpdate(createReactionUpdate([emoji]));
+      await pending;
+
+      expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes(`confirmed ${expected}`))).toBe(true);
+    }
+  });
+
+  it("dedupes changed and removed reactions after the first confirm answer is consumed", async () => {
+    const { bot, pi, api } = setupBot({
+      piSessionOverrides: {
+        listSlashCommands: vi.fn().mockResolvedValue([
+          { name: "confirm", description: "Confirm action", source: "extension", path: "/ext/confirm.ts" },
+        ]),
+      },
+    });
+
+    const promptMock = pi.service.prompt as ReturnType<typeof vi.fn>;
+    promptMock.mockImplementation(async () => {
+      const confirmed = await pi.getExtensionBindings()?.uiContext?.confirm("Confirm deploy", "Ship it?");
+      pi.emitTextDelta(`confirmed ${confirmed}`);
+      pi.emitAgentEnd();
+    });
+
+    const pending = bot.handleUpdate(createTestUpdate({ message: { text: "/confirm" } }));
+    await nextTick();
+
+    await bot.handleUpdate(createReactionUpdate(["👍"]));
+    await pending;
+    await bot.handleUpdate(createReactionUpdate(["👎"], { message_reaction: { old_reaction: [{ type: "emoji", emoji: "👍" }] } }));
+    await bot.handleUpdate(createReactionUpdate([], { message_reaction: { old_reaction: [{ type: "emoji", emoji: "👎" }] } }));
+
+    const confirmedTrueCalls = api.sendMessage.mock.calls.filter((call) => String(call[1]).includes("confirmed true")).length;
+    const confirmedFalseCalls = api.sendMessage.mock.calls.filter((call) => String(call[1]).includes("confirmed false")).length;
+    expect(confirmedTrueCalls).toBe(1);
+    expect(confirmedFalseCalls).toBe(0);
+  });
+
+  it("ignores reactions on stale or ineligible messages", async () => {
+    const { bot, pi, api } = setupBot({
+      piSessionOverrides: {
+        listSlashCommands: vi.fn().mockResolvedValue([
+          { name: "confirm", description: "Confirm action", source: "extension", path: "/ext/confirm.ts" },
+        ]),
+      },
+    });
+
+    const promptMock = pi.service.prompt as ReturnType<typeof vi.fn>;
+    promptMock.mockImplementation(async () => {
+      const confirmed = await pi.getExtensionBindings()?.uiContext?.confirm("Confirm deploy", "Ship it?");
+      pi.emitTextDelta(`confirmed ${confirmed}`);
+      pi.emitAgentEnd();
+    });
+
+    const pending = bot.handleUpdate(createTestUpdate({ message: { text: "/confirm" } }));
+    await nextTick();
+
+    await bot.handleUpdate(createReactionUpdate(["👍"], { message_reaction: { message_id: 99 } }));
+    await nextTick();
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("confirmed true"))).toBe(false);
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("confirmed false"))).toBe(false);
+
+    await bot.handleUpdate(createReactionUpdate(["👎"]));
+    await pending;
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("confirmed false"))).toBe(true);
+  });
+
+  it("scopes confirm reactions to the correct chat topic by message id", async () => {
+    const { bot, api, registry } = setupBot();
+
+    const topicOneContext = { chatId: ALLOWED_CHAT_ID, messageThreadId: 101 };
+    const topicTwoContext = { chatId: ALLOWED_CHAT_ID, messageThreadId: 202 };
+
+    await registry.registry.getOrCreate(topicOneContext);
+    await registry.registry.getOrCreate(topicTwoContext);
+
+    const topicOne = registry.getSession(ALLOWED_CHAT_ID, 101)!;
+    const topicTwo = registry.getSession(ALLOWED_CHAT_ID, 202)!;
+    const slashCommands = [{ name: "confirm", description: "Confirm action", source: "extension", path: "/ext/confirm.ts" }];
+
+    (topicOne.service.listSlashCommands as ReturnType<typeof vi.fn>).mockResolvedValue(slashCommands);
+    (topicTwo.service.listSlashCommands as ReturnType<typeof vi.fn>).mockResolvedValue(slashCommands);
+    (topicOne.service.prompt as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      const confirmed = await topicOne.getExtensionBindings()?.uiContext?.confirm("Topic 101", "Ship it?");
+      topicOne.emitTextDelta(`topic-101 confirmed ${confirmed}`);
+      topicOne.emitAgentEnd();
+    });
+    (topicTwo.service.prompt as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      const confirmed = await topicTwo.getExtensionBindings()?.uiContext?.confirm("Topic 202", "Ship it?");
+      topicTwo.emitTextDelta(`topic-202 confirmed ${confirmed}`);
+      topicTwo.emitAgentEnd();
+    });
+
+    const pendingOne = bot.handleUpdate(
+      createTestUpdate({
+        message: {
+          text: "/confirm",
+          chat: { id: ALLOWED_CHAT_ID, type: "supergroup" },
+          message_thread_id: 101,
+        },
+      }),
+    );
+    await nextTick();
+    const pendingTwo = bot.handleUpdate(
+      createTestUpdate({
+        message: {
+          text: "/confirm",
+          chat: { id: ALLOWED_CHAT_ID, type: "supergroup" },
+          message_thread_id: 202,
+        },
+      }),
+    );
+    await nextTick();
+
+    let topicOneResolved = false;
+    void pendingOne.then(() => {
+      topicOneResolved = true;
+    });
+
+    await bot.handleUpdate(
+      createReactionUpdate(["👎"], {
+        message_reaction: {
+          chat: { id: ALLOWED_CHAT_ID, type: "supergroup" },
+          message_id: 2,
+        },
+      }),
+    );
+    await pendingTwo;
+    await nextTick();
+
+    expect(topicOneResolved).toBe(false);
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("topic-202 confirmed false"))).toBe(true);
+
+    await bot.handleUpdate(
+      createReactionUpdate(["👍"], {
+        message_reaction: {
+          chat: { id: ALLOWED_CHAT_ID, type: "supergroup" },
+          message_id: 1,
+        },
+      }),
+    );
+    await pendingOne;
+
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("topic-101 confirmed true"))).toBe(true);
   });
 
   it("supports extension input dialogs through Telegram replies", async () => {
