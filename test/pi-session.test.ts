@@ -6,6 +6,16 @@ import { vi } from "vitest";
 
 import type { TelePiConfig } from "../src/config.js";
 
+function createDeferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 const mockState = vi.hoisted(() => {
   const models = [
     { provider: "anthropic", id: "claude-sonnet-4-5", name: "Claude Sonnet" },
@@ -135,6 +145,7 @@ const mockState = vi.hoisted(() => {
       },
       sessionManager: {
         ...sessionManager,
+        getEntries: vi.fn().mockReturnValue([]),
         getTree: vi.fn().mockReturnValue([]),
         getLeafId: vi.fn().mockReturnValue("leaf-id"),
         getEntry: vi.fn().mockImplementation((id: string) =>
@@ -712,6 +723,38 @@ describe("PiSessionService", () => {
       assistantMessageEvent: { type: "text_delta", delta: "Rebound" },
     });
     expect(onTextDelta).toHaveBeenCalledWith("Rebound");
+  });
+
+  it("shares in-flight notification state across watcher rebinds", async () => {
+    const service = await PiSessionService.create(createConfig());
+    const session = mockState.createdSessions[0]?.session;
+    session.sessionFile = undefined;
+    const entry = {
+      type: "custom_message",
+      id: "entry-1",
+      parentId: null,
+      timestamp: "2025-01-01T00:00:00.000Z",
+      customType: "subagent-notify",
+      content: "Background task completed: **worker**\nDone.",
+      display: true,
+      details: { status: "completed", agent: "worker" },
+    } as any;
+    session.sessionManager.getEntries.mockReturnValue([entry]);
+
+    const sendDeferred = createDeferred<void>();
+    const send = vi.fn().mockReturnValue(sendDeferred.promise);
+    const seen = new Set<string>();
+
+    service.attachNotificationWatcher(send, (id) => seen.has(id), (id) => seen.add(id));
+    expect(send).toHaveBeenCalledTimes(1);
+
+    service.attachNotificationWatcher(send, (id) => seen.has(id), (id) => seen.add(id));
+    expect(send).toHaveBeenCalledTimes(1);
+
+    sendDeferred.resolve();
+    await sendDeferred.promise;
+    await Promise.resolve();
+    expect(seen.has("entry-1")).toBe(true);
   });
 
   it("creates a new handle when starting a session in another workspace", async () => {
@@ -1959,7 +2002,7 @@ describe("PiSessionService", () => {
   });
 
   it("creates independent services per Telegram context", async () => {
-    const registry = await PiSessionRegistry.create(createConfig({ piSessionPath: "/sessions/bootstrap.jsonl" }));
+    const registry = await PiSessionRegistry.create(createConfig());
 
     const rootService = await registry.getOrCreate({ chatId: 1 });
     const topicService = await registry.getOrCreate({ chatId: 1, messageThreadId: 99 });
@@ -1968,15 +2011,47 @@ describe("PiSessionService", () => {
     expect(rootAgain).toBe(rootService);
     expect(topicService).not.toBe(rootService);
     expect(mockState.createAgentSession).toHaveBeenCalledTimes(2);
-    expect(mockState.SessionManager.open).toHaveBeenNthCalledWith(1, "/sessions/bootstrap.jsonl", undefined, "/workspace/base");
     expect(mockState.SessionManager.create).toHaveBeenNthCalledWith(1, "/workspace/base");
-    expect(mockState.createAgentSession).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({
-        services: expect.objectContaining({ cwd: "/workspace/base" }),
-        sessionManager: expect.objectContaining({ sessionPath: "/sessions/bootstrap.jsonl" }),
-      }),
-    );
+    expect(mockState.SessionManager.create).toHaveBeenNthCalledWith(2, "/workspace/base");
+  });
+
+  it("reserves bootstrap session startup for the bootstrap context only", async () => {
+    const registry = await PiSessionRegistry.create(createConfig({ piSessionPath: "/sessions/bootstrap.jsonl" }));
+
+    registry.startBootstrapNotificationWatcher();
+    const otherService = await registry.getOrCreate({ chatId: 999 });
+    const bootstrapService = await registry.getOrCreate({ chatId: 123 });
+
+    expect(otherService).not.toBe(bootstrapService);
+    expect(mockState.SessionManager.create).toHaveBeenCalledWith("/workspace/base");
+    expect(mockState.SessionManager.open).toHaveBeenCalledWith("/sessions/bootstrap.jsonl", undefined, "/workspace/base");
+  });
+
+  it("starts bootstrap watcher when duplicate allowed-user IDs resolve to one user", async () => {
+    const registry = await PiSessionRegistry.create(createConfig({
+      telegramAllowedUserIds: [123, 123],
+      telegramAllowedUserIdSet: new Set([123]),
+      piSessionPath: "/sessions/bootstrap.jsonl",
+    }));
+
+    registry.startBootstrapNotificationWatcher();
+    await registry.getOrCreate({ chatId: 123 });
+
+    expect(mockState.SessionManager.open).toHaveBeenCalledWith("/sessions/bootstrap.jsonl", undefined, "/workspace/base");
+  });
+
+  it("retries bootstrap session startup without consuming the configured path on failure", async () => {
+    const registry = await PiSessionRegistry.create(createConfig({ piSessionPath: "/sessions/bootstrap.jsonl" }));
+    mockState.createAgentSessionRuntime.mockRejectedValueOnce(new Error("bootstrap failed"));
+
+    registry.startBootstrapNotificationWatcher();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const service = await registry.getOrCreate({ chatId: 123 });
+    expect(service.hasActiveSession()).toBe(true);
+    expect(mockState.SessionManager.open).toHaveBeenNthCalledWith(1, "/sessions/bootstrap.jsonl", undefined, "/workspace/base");
+    expect(mockState.SessionManager.open).toHaveBeenNthCalledWith(2, "/sessions/bootstrap.jsonl", undefined, "/workspace/base");
+    expect(mockState.SessionManager.create).not.toHaveBeenCalled();
   });
 
   it("deduplicates concurrent getOrCreate calls for the same context", async () => {
