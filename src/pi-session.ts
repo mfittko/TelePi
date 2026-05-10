@@ -1036,7 +1036,7 @@ export class PiSessionRegistry {
   private readonly inflight = new Map<string, Promise<PiSessionService>>();
   private readonly generations = new Map<string, number>();
   private bootstrapSessionPath?: string;
-  private notificationSender?: (context: PiSessionContext, text: string) => void;
+  private notificationSender?: (context: PiSessionContext, text: string) => Promise<void>;
   private readonly dedupeStore = NotificationDedupeStore.createDefault();
 
   private constructor(private readonly config: TelePiConfig) {
@@ -1055,7 +1055,7 @@ export class PiSessionRegistry {
    * actionable custom message (e.g. subagent-notify, subagent_control_notice)
    * is received on any attached Pi session.
    */
-  registerNotificationSender(sender: (context: PiSessionContext, text: string) => void): void {
+  registerNotificationSender(sender: (context: PiSessionContext, text: string) => Promise<void>): void {
     this.notificationSender = sender;
   }
 
@@ -1150,9 +1150,7 @@ export class PiSessionRegistry {
 
     const sender = this.notificationSender;
     service.attachNotificationWatcher(
-      (text) => {
-        sender(context, text);
-      },
+      (text) => sender(context, text),
       (id) => this.dedupeStore.has(contextKey, id),
       (id) => this.dedupeStore.add(contextKey, id),
     );

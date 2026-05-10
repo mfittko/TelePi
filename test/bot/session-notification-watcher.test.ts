@@ -384,11 +384,15 @@ describe("formatNotification — subagent_control_notice", () => {
 // createSessionNotificationWatcher — catch-up
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// createSessionNotificationWatcher — catch-up
+// ---------------------------------------------------------------------------
+
 describe("createSessionNotificationWatcher — catch-up", () => {
-  it("sends notifications for existing actionable entries not yet seen", () => {
+  it("sends notifications for existing actionable entries not yet seen", async () => {
     const entry = makeCustomMessageEntry("subagent-notify", true, { status: "completed", agent: "a1" });
     const session = makeMockSession([entry]);
-    const send = vi.fn();
+    const send = vi.fn().mockResolvedValue(undefined);
     const seen = new Set<string>();
 
     createSessionNotificationWatcher(session as any, (id) => seen.has(id), (id) => seen.add(id), send);
@@ -396,6 +400,8 @@ describe("createSessionNotificationWatcher — catch-up", () => {
     expect(send).toHaveBeenCalledOnce();
     // No content body — header only.
     expect(send).toHaveBeenCalledWith("✅ Background task completed: a1");
+    // markSeen is async — flush microtasks before asserting.
+    await Promise.resolve();
     expect(seen.has("entry-1")).toBe(true);
   });
 
@@ -407,7 +413,7 @@ describe("createSessionNotificationWatcher — catch-up", () => {
       "All tests passed. The PR is ready to merge.",
     );
     const session = makeMockSession([entry]);
-    const send = vi.fn();
+    const send = vi.fn().mockResolvedValue(undefined);
     const seen = new Set<string>();
 
     createSessionNotificationWatcher(session as any, (id) => seen.has(id), (id) => seen.add(id), send);
@@ -420,7 +426,7 @@ describe("createSessionNotificationWatcher — catch-up", () => {
   it("skips entries that are already seen", () => {
     const entry = makeCustomMessageEntry("subagent-notify", true, { status: "completed" });
     const session = makeMockSession([entry]);
-    const send = vi.fn();
+    const send = vi.fn().mockResolvedValue(undefined);
     const seen = new Set<string>(["entry-1"]);
 
     createSessionNotificationWatcher(session as any, (id) => seen.has(id), (id) => seen.add(id), send);
@@ -431,7 +437,7 @@ describe("createSessionNotificationWatcher — catch-up", () => {
   it("skips non-whitelisted custom_message entries", () => {
     const entry = makeCustomMessageEntry("other-type", true);
     const session = makeMockSession([entry]);
-    const send = vi.fn();
+    const send = vi.fn().mockResolvedValue(undefined);
     const seen = new Set<string>();
 
     createSessionNotificationWatcher(session as any, (id) => seen.has(id), (id) => seen.add(id), send);
@@ -442,7 +448,7 @@ describe("createSessionNotificationWatcher — catch-up", () => {
   it("skips display=false entries", () => {
     const entry = makeCustomMessageEntry("subagent-notify", false, { status: "completed" });
     const session = makeMockSession([entry]);
-    const send = vi.fn();
+    const send = vi.fn().mockResolvedValue(undefined);
     const seen = new Set<string>();
 
     createSessionNotificationWatcher(session as any, (id) => seen.has(id), (id) => seen.add(id), send);
@@ -453,7 +459,7 @@ describe("createSessionNotificationWatcher — catch-up", () => {
   it("skips ordinary session message entries", () => {
     const msgEntry = makeSessionEntry();
     const session = makeMockSession([msgEntry]);
-    const send = vi.fn();
+    const send = vi.fn().mockResolvedValue(undefined);
     const seen = new Set<string>();
 
     createSessionNotificationWatcher(session as any, (id) => seen.has(id), (id) => seen.add(id), send);
@@ -467,7 +473,7 @@ describe("createSessionNotificationWatcher — catch-up", () => {
       makeCustomMessageEntry("subagent-notify", true, { status: "failed", agent: "a2" }, "", "id-2"),
     ];
     const session = makeMockSession(entries);
-    const send = vi.fn();
+    const send = vi.fn().mockResolvedValue(undefined);
     const seen = new Set<string>();
 
     createSessionNotificationWatcher(session as any, (id) => seen.has(id), (id) => seen.add(id), send);
@@ -476,6 +482,50 @@ describe("createSessionNotificationWatcher — catch-up", () => {
     // No content on either entry — header only.
     expect(send).toHaveBeenNthCalledWith(1, "✅ Background task completed: a1");
     expect(send).toHaveBeenNthCalledWith(2, "❌ Background task failed: a2");
+  });
+
+  it("does not mark as seen when send fails", async () => {
+    const entry = makeCustomMessageEntry("subagent-notify", true, { status: "completed" });
+    const session = makeMockSession([entry]);
+    const send = vi.fn().mockRejectedValue(new Error("Telegram error"));
+    const seen = new Set<string>();
+
+    createSessionNotificationWatcher(session as any, (id) => seen.has(id), (id) => seen.add(id), send);
+
+    expect(send).toHaveBeenCalledOnce();
+    // Flush microtasks — the rejection handler runs, but markSeen must NOT have been called.
+    await Promise.resolve();
+    expect(seen.has("entry-1")).toBe(false);
+  });
+
+  it("retries delivery on next watcher attach after a previous send failure", async () => {
+    const entry = makeCustomMessageEntry("subagent-notify", true, { status: "completed" });
+    const session = makeMockSession([entry]);
+    const seen = new Set<string>();
+
+    // First attach — send fails, entry stays un-marked.
+    const send1 = vi.fn().mockRejectedValue(new Error("network error"));
+    const unsub1 = createSessionNotificationWatcher(
+      session as any,
+      (id) => seen.has(id),
+      (id) => seen.add(id),
+      send1,
+    );
+    await Promise.resolve(); // flush rejection — markSeen NOT called
+    unsub1();
+
+    // Second attach (rebind after reconnect) — send now succeeds.
+    const send2 = vi.fn().mockResolvedValue(undefined);
+    createSessionNotificationWatcher(
+      session as any,
+      (id) => seen.has(id),
+      (id) => seen.add(id),
+      send2,
+    );
+    // Entry is still not seen — should be retried.
+    expect(send2).toHaveBeenCalledOnce();
+    await Promise.resolve(); // flush — markSeen called this time
+    expect(seen.has("entry-1")).toBe(true);
   });
 });
 
@@ -487,7 +537,7 @@ describe("createSessionNotificationWatcher — live events", () => {
   it("sends notification on message_end for actionable custom message", () => {
     const entry = makeCustomMessageEntry("subagent-notify", true, { status: "completed", agent: "live-agent" });
     const session = makeMockSession([entry]);
-    const send = vi.fn();
+    const send = vi.fn().mockResolvedValue(undefined);
     const seen = new Set<string>();
 
     createSessionNotificationWatcher(session as any, (id) => seen.has(id), (id) => seen.add(id), send);
@@ -522,7 +572,7 @@ describe("createSessionNotificationWatcher — live events", () => {
 
   it("ignores non-custom message_end events", () => {
     const session = makeMockSession([]);
-    const send = vi.fn();
+    const send = vi.fn().mockResolvedValue(undefined);
     const seen = new Set<string>();
 
     createSessionNotificationWatcher(session as any, (id) => seen.has(id), (id) => seen.add(id), send);
@@ -537,7 +587,7 @@ describe("createSessionNotificationWatcher — live events", () => {
 
   it("ignores message_update events", () => {
     const session = makeMockSession([]);
-    const send = vi.fn();
+    const send = vi.fn().mockResolvedValue(undefined);
     const seen = new Set<string>();
 
     createSessionNotificationWatcher(session as any, (id) => seen.has(id), (id) => seen.add(id), send);
@@ -549,7 +599,7 @@ describe("createSessionNotificationWatcher — live events", () => {
 
   it("ignores non-whitelisted customType in live events", () => {
     const session = makeMockSession([]);
-    const send = vi.fn();
+    const send = vi.fn().mockResolvedValue(undefined);
     const seen = new Set<string>();
 
     createSessionNotificationWatcher(session as any, (id) => seen.has(id), (id) => seen.add(id), send);
@@ -564,7 +614,7 @@ describe("createSessionNotificationWatcher — live events", () => {
 
   it("ignores display=false in live events", () => {
     const session = makeMockSession([]);
-    const send = vi.fn();
+    const send = vi.fn().mockResolvedValue(undefined);
     const seen = new Set<string>();
 
     createSessionNotificationWatcher(session as any, (id) => seen.has(id), (id) => seen.add(id), send);
@@ -591,7 +641,7 @@ describe("createSessionNotificationWatcher — dedupe", () => {
   it("does not re-send a notification already in seenIds", () => {
     const entry = makeCustomMessageEntry("subagent-notify", true, { status: "completed" });
     const session = makeMockSession([entry]);
-    const send = vi.fn();
+    const send = vi.fn().mockResolvedValue(undefined);
     const seen = new Set<string>(["entry-1"]);
 
     createSessionNotificationWatcher(session as any, (id) => seen.has(id), (id) => seen.add(id), send);
@@ -599,13 +649,13 @@ describe("createSessionNotificationWatcher — dedupe", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
-  it("deduplicates across watcher rebind (same seen set)", () => {
+  it("deduplicates across watcher rebind (same seen set)", async () => {
     const entry = makeCustomMessageEntry("subagent-notify", true, { status: "completed" });
     const session = makeMockSession([entry]);
-    const send = vi.fn();
+    const send = vi.fn().mockResolvedValue(undefined);
     const seen = new Set<string>();
 
-    // First watcher attach — sends the notification and marks it seen.
+    // First watcher attach — sends the notification.
     const unsub1 = createSessionNotificationWatcher(
       session as any,
       (id) => seen.has(id),
@@ -613,6 +663,8 @@ describe("createSessionNotificationWatcher — dedupe", () => {
       send,
     );
     expect(send).toHaveBeenCalledOnce();
+    // Flush microtasks so markSeen runs before the second attach.
+    await Promise.resolve();
     unsub1();
 
     // Second watcher attach (rebind) with the same seen set — should NOT resend.
@@ -630,7 +682,7 @@ describe("createSessionNotificationWatcher — dedupe", () => {
 
     // Context A
     const sessionA = makeMockSession([entry]);
-    const sendA = vi.fn();
+    const sendA = vi.fn().mockResolvedValue(undefined);
     const seenA = new Set<string>();
     createSessionNotificationWatcher(
       sessionA as any,
@@ -641,7 +693,7 @@ describe("createSessionNotificationWatcher — dedupe", () => {
 
     // Context B — same entry, separate seen set
     const sessionB = makeMockSession([entry]);
-    const sendB = vi.fn();
+    const sendB = vi.fn().mockResolvedValue(undefined);
     const seenB = new Set<string>();
     createSessionNotificationWatcher(
       sessionB as any,
@@ -654,9 +706,9 @@ describe("createSessionNotificationWatcher — dedupe", () => {
     expect(sendB).toHaveBeenCalledOnce();
   });
 
-  it("uses fallback id for live events when entry not found in session", () => {
+  it("uses fallback id for live events when entry not found in session", async () => {
     const session = makeMockSession([]); // no entries
-    const send = vi.fn();
+    const send = vi.fn().mockResolvedValue(undefined);
     const seen = new Set<string>();
 
     createSessionNotificationWatcher(session as any, (id) => seen.has(id), (id) => seen.add(id), send);
@@ -675,9 +727,11 @@ describe("createSessionNotificationWatcher — dedupe", () => {
 
     expect(send).toHaveBeenCalledOnce();
     expect(send).toHaveBeenCalledWith("✅ Background task completed");
+    // Flush microtasks so markSeen runs.
+    await Promise.resolve();
     expect(seen.has(`subagent-notify::${ts}`)).toBe(true);
 
-    // Emitting the same event again should NOT resend.
+    // Emitting the same event again should NOT resend (isAlreadySeen is now true).
     send.mockClear();
     session.emit({
       type: "message_end",
@@ -701,7 +755,7 @@ describe("createSessionNotificationWatcher — dedupe", () => {
 describe("createSessionNotificationWatcher — unsubscribe", () => {
   it("stops delivering events after unsubscribe", () => {
     const session = makeMockSession([]);
-    const send = vi.fn();
+    const send = vi.fn().mockResolvedValue(undefined);
     const seen = new Set<string>();
 
     const unsub = createSessionNotificationWatcher(

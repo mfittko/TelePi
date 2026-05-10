@@ -15,7 +15,7 @@ export const ACTIONABLE_CUSTOM_TYPES = new Set([
   "subagent_control_notice",
 ]);
 
-export type NotificationSend = (text: string) => void | Promise<void>;
+export type NotificationSend = (text: string) => Promise<void>;
 
 /**
  * Returns true if the session entry is an actionable custom message
@@ -144,6 +144,14 @@ function formatControlNotice(entry: CustomMessageEntry): string {
   return `⚠️ Subagent notice${suffix}: ${truncated}`;
 }
 
+/**
+ * Attempt to deliver a single notification entry.
+ *
+ * `markSeen` is called only after `send` resolves successfully. If delivery
+ * fails the entry is intentionally left un-marked so the next catch-up or
+ * live-event pass can retry it. Any error is logged but not re-thrown —
+ * delivery is best-effort and must not crash the caller.
+ */
 function tryDeliverEntry(
   entry: CustomMessageEntry,
   isAlreadySeen: (id: string) => boolean,
@@ -153,14 +161,18 @@ function tryDeliverEntry(
   if (isAlreadySeen(entry.id)) {
     return;
   }
-  markSeen(entry.id);
   const text = formatNotification(entry);
   if (!text) {
+    // No notification text — mark as seen to avoid repeated attempts.
+    markSeen(entry.id);
     return;
   }
-  void Promise.resolve(send(text)).catch((error) => {
-    console.error("Failed to send session notification:", error);
-  });
+  void send(text).then(
+    () => markSeen(entry.id),
+    (error) => {
+      console.error("Failed to send session notification:", error);
+    },
+  );
 }
 
 /**

@@ -115,5 +115,44 @@ describe("NotificationDedupeStore", () => {
     // Dispose immediately — no file should be written.
     store.dispose();
   });
-});
 
+  it("flush preserves on-disk context keys not loaded in the current instance", () => {
+    const { store: store1, filePath, dir } = track(makeTempStore());
+    dirs.push(dir);
+
+    // Instance 1 persists ctx-1.
+    store1.add("ctx-1", "entry-a");
+    store1.flush();
+
+    // Instance 2 only touches ctx-2.
+    const store2 = new NotificationDedupeStore(filePath);
+    store2.add("ctx-2", "entry-b");
+    store2.flush();
+
+    // Both contexts must be present on disk.
+    const raw = JSON.parse(readFileSync(filePath, "utf8"));
+    expect(raw["ctx-1"]).toContain("entry-a");
+    expect(raw["ctx-2"]).toContain("entry-b");
+  });
+
+  it("flush merges in-memory updates on top of existing on-disk state", () => {
+    const { store: store1, filePath, dir } = track(makeTempStore());
+    dirs.push(dir);
+
+    // Instance 1 persists ctx-1 with entry-a.
+    store1.add("ctx-1", "entry-a");
+    store1.flush();
+
+    // Instance 2 loads ctx-1 and adds entry-b.
+    const store2 = new NotificationDedupeStore(filePath);
+    expect(store2.has("ctx-1", "entry-a")).toBe(true); // loaded from disk
+    store2.add("ctx-1", "entry-b");
+    store2.flush();
+
+    const raw = JSON.parse(readFileSync(filePath, "utf8"));
+    expect(raw["ctx-1"]).toContain("entry-a");
+    expect(raw["ctx-1"]).toContain("entry-b");
+  });
+
+
+});

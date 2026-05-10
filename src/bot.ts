@@ -70,10 +70,8 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
   // Register a proactive notification sender so the registry can forward
   // actionable Pi session events (e.g. subagent-notify) to the correct
   // Telegram chat/topic without requiring an active user prompt.
-  sessionRegistry.registerNotificationSender((context, text) => {
-    void sendTextMessage(bot.api, context, text, { fallbackText: text }).catch((error) => {
-      console.error("Failed to send proactive session notification:", error);
-    });
+  sessionRegistry.registerNotificationSender(async (context, text) => {
+    await sendTextMessage(bot.api, context, text, { fallbackText: text });
   });
 
   const chatState = createBotChatState();

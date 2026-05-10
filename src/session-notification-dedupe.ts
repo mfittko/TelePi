@@ -68,6 +68,13 @@ export class NotificationDedupeStore {
 
   /**
    * Flush pending changes to disk synchronously.
+   *
+   * Reads the existing on-disk store first and merges it with the in-memory
+   * state before writing. This preserves dedupe entries for Telegram
+   * chat/topic contexts that were not loaded during the current process
+   * lifetime, preventing those contexts from receiving duplicate notifications
+   * after a bot restart.
+   *
    * Call during graceful shutdown to avoid data loss.
    */
   flush(): void {
@@ -76,7 +83,22 @@ export class NotificationDedupeStore {
     }
     this.dirty = false;
 
-    const store: RawStore = {};
+    // Start from the current on-disk state to preserve contexts not in memory.
+    let baseStore: RawStore = {};
+    try {
+      if (existsSync(this.filePath)) {
+        const raw = readFileSync(this.filePath, "utf8");
+        const parsed = JSON.parse(raw) as RawStore;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          baseStore = parsed;
+        }
+      }
+    } catch {
+      // Corrupted file — start fresh; in-memory state will be written below.
+    }
+
+    // Overwrite with in-memory state (which may have newer/more entries).
+    const store: RawStore = { ...baseStore };
     for (const [key, ids] of this.inMemory) {
       const arr = [...ids];
       // Trim to the most recent MAX_KEYS_PER_CONTEXT entries.
