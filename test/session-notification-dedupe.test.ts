@@ -190,8 +190,7 @@ describe("NotificationDedupeStore", () => {
   });
 
   it("flush preserves on-disk context keys not loaded in the current instance", () => {
-    const { store: store1, filePath, dir } = track(makeTempStore());
-    dirs.push(dir);
+    const { store: store1, filePath } = track(makeTempStore());
 
     // Instance 1 persists ctx-1.
     store1.add("ctx-1", "entry-a");
@@ -209,8 +208,7 @@ describe("NotificationDedupeStore", () => {
   });
 
   it("flush merges in-memory updates on top of existing on-disk state", () => {
-    const { store: store1, filePath, dir } = track(makeTempStore());
-    dirs.push(dir);
+    const { store: store1, filePath } = track(makeTempStore());
 
     // Instance 1 persists ctx-1 with entry-a.
     store1.add("ctx-1", "entry-a");

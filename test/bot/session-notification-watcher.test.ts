@@ -321,20 +321,44 @@ describe("createSessionNotificationWatcher — catch-up", () => {
   });
 
   it("does not mark as seen when send fails", async () => {
+    vi.useFakeTimers();
     const entry = makeCustomMessageEntry("subagent-notify", true, { status: "completed" });
     const session = makeMockSession([entry]);
     const send = vi.fn().mockRejectedValue(new Error("Telegram error"));
     const seen = new Set<string>();
 
-    createSessionNotificationWatcher(session as any, (id) => seen.has(id), (id) => seen.add(id), send);
+    const unsubscribe = createSessionNotificationWatcher(session as any, (id) => seen.has(id), (id) => seen.add(id), send);
 
     expect(send).toHaveBeenCalledOnce();
     // Flush microtasks — the rejection handler runs, but markSeen must NOT have been called.
     await Promise.resolve();
     expect(seen.has("entry-1")).toBe(false);
+    unsubscribe();
+  });
+
+  it("retries failed delivery while the watcher remains attached", async () => {
+    vi.useFakeTimers();
+    const entry = makeCustomMessageEntry("subagent-notify", true, { status: "completed" });
+    const session = makeMockSession([entry]);
+    const send = vi.fn()
+      .mockRejectedValueOnce(new Error("network error"))
+      .mockResolvedValue(undefined);
+    const seen = new Set<string>();
+
+    const unsubscribe = createSessionNotificationWatcher(session as any, (id) => seen.has(id), (id) => seen.add(id), send);
+    await Promise.resolve();
+    expect(seen.has("entry-1")).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(5000);
+    await Promise.resolve();
+
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(seen.has("entry-1")).toBe(true);
+    unsubscribe();
   });
 
   it("retries delivery on next watcher attach after a previous send failure", async () => {
+    vi.useFakeTimers();
     const entry = makeCustomMessageEntry("subagent-notify", true, { status: "completed" });
     const session = makeMockSession([entry]);
     const seen = new Set<string>();

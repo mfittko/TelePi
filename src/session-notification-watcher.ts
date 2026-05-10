@@ -318,6 +318,7 @@ function tryDeliverEntry(
   markSeen: (id: string) => void,
   send: NotificationSend,
   inFlight: Set<string>,
+  retry?: () => void,
 ): void {
   if (isAlreadySeen(entry.id) || inFlight.has(entry.id)) {
     return;
@@ -336,6 +337,7 @@ function tryDeliverEntry(
       () => markSeen(entry.id),
       (error) => {
         console.error("Failed to send session notification:", error);
+        retry?.();
       },
     )
     .finally(() => {
@@ -366,6 +368,25 @@ export function createSessionNotificationWatcher(
   const sessionFile = getSessionFile(session);
   let fileOffset = 0;
   let tailBytes: TailBuffer = Buffer.alloc(0) as TailBuffer;
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let disposed = false;
+
+  const scheduleRetry = (): void => {
+    if (disposed || retryTimer !== undefined) {
+      return;
+    }
+    retryTimer = setTimeout(() => {
+      retryTimer = undefined;
+      if (disposed) {
+        return;
+      }
+      for (const entry of session.sessionManager.getEntries()) {
+        if (isActionableCustomMessageEntry(entry)) {
+          tryDeliverEntry(entry, isAlreadySeen, markSeen, send, inFlight, scheduleRetry);
+        }
+      }
+    }, 5000);
+  };
 
   const initialFileSize = sessionFile
     ? (() => {
@@ -380,7 +401,7 @@ export function createSessionNotificationWatcher(
   // Catch-up: deliver any actionable notifications already in the session.
   for (const entry of session.sessionManager.getEntries()) {
     if (isActionableCustomMessageEntry(entry)) {
-      tryDeliverEntry(entry, isAlreadySeen, markSeen, send, inFlight);
+      tryDeliverEntry(entry, isAlreadySeen, markSeen, send, inFlight, scheduleRetry);
     }
   }
 
@@ -401,7 +422,7 @@ export function createSessionNotificationWatcher(
 
           for (const entry of entries) {
             if (isActionableCustomMessageEntry(entry)) {
-              tryDeliverEntry(entry, isAlreadySeen, markSeen, send, inFlight);
+              tryDeliverEntry(entry, isAlreadySeen, markSeen, send, inFlight, scheduleRetry);
             }
           }
         } catch (error) {
@@ -443,7 +464,7 @@ export function createSessionNotificationWatcher(
       const entry = entries[i];
       if (entry.type === "custom_message" && (entry as CustomMessageEntry).customType === message.customType) {
         if (isActionableCustomMessageEntry(entry)) {
-          tryDeliverEntry(entry, isAlreadySeen, markSeen, send, inFlight);
+          tryDeliverEntry(entry, isAlreadySeen, markSeen, send, inFlight, scheduleRetry);
         }
         return;
       }
@@ -465,10 +486,15 @@ export function createSessionNotificationWatcher(
       display: true,
       details: message.details,
     };
-    tryDeliverEntry(syntheticEntry, isAlreadySeen, markSeen, send, inFlight);
+    tryDeliverEntry(syntheticEntry, isAlreadySeen, markSeen, send, inFlight, scheduleRetry);
   });
 
   return () => {
+    disposed = true;
+    if (retryTimer !== undefined) {
+      clearTimeout(retryTimer);
+      retryTimer = undefined;
+    }
     unsubscribeSession();
     if (sessionFile && drainFile) {
       unwatchFile(sessionFile, drainFile);

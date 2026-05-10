@@ -71,7 +71,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
   // actionable Pi session events (e.g. subagent-notify) to the correct
   // Telegram chat/topic without requiring an active user prompt.
   sessionRegistry.registerNotificationSender(async (context, text) => {
-    await sendTextMessage(bot.api, context, text, { fallbackText: text });
+    await sendTextMessage(bot.api, context, text, { parseMode: undefined, fallbackText: text });
   });
   sessionRegistry.startBootstrapNotificationWatcher?.();
 
