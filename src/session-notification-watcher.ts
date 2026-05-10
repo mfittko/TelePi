@@ -6,7 +6,10 @@ import type { CustomMessageEntry, SessionEntry } from "@mariozechner/pi-coding-a
  */
 const MAX_NOTIFICATION_TEXT_LENGTH = 200;
 
-
+/**
+ * Custom message types that are forwarded as Telegram notifications.
+ * Only whitelisted types are sent — ordinary assistant/user/tool messages are never forwarded.
+ */
 export const ACTIONABLE_CUSTOM_TYPES = new Set([
   "subagent-notify",
   "subagent_control_notice",
@@ -71,9 +74,13 @@ function formatSubagentNotify(entry: CustomMessageEntry): string {
   }
 
   const text = notice ?? (typeof entry.content === "string" ? entry.content.trim() : "");
-  return text
-    ? `🔔 Subagent notification${suffix}: ${text.slice(0, MAX_NOTIFICATION_TEXT_LENGTH)}`
-    : `🔔 Subagent notification${suffix}`;
+  if (!text) {
+    return `🔔 Subagent notification${suffix}`;
+  }
+  const truncated = text.length > MAX_NOTIFICATION_TEXT_LENGTH
+    ? `${text.slice(0, MAX_NOTIFICATION_TEXT_LENGTH)}…`
+    : text;
+  return `🔔 Subagent notification${suffix}: ${truncated}`;
 }
 
 function formatControlNotice(entry: CustomMessageEntry): string {
@@ -87,9 +94,13 @@ function formatControlNotice(entry: CustomMessageEntry): string {
   }
 
   const text = notice ?? (typeof entry.content === "string" ? entry.content.trim() : "");
-  return text
-    ? `⚠️ Subagent notice${suffix}: ${text.slice(0, MAX_NOTIFICATION_TEXT_LENGTH)}`
-    : `⚠️ Subagent notice${suffix}`;
+  if (!text) {
+    return `⚠️ Subagent notice${suffix}`;
+  }
+  const truncated = text.length > MAX_NOTIFICATION_TEXT_LENGTH
+    ? `${text.slice(0, MAX_NOTIFICATION_TEXT_LENGTH)}…`
+    : text;
+  return `⚠️ Subagent notice${suffix}: ${truncated}`;
 }
 
 function tryDeliverEntry(

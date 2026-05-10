@@ -167,12 +167,16 @@ describe("formatNotification — subagent-notify", () => {
     expect(formatNotification(entry)).toBe("🔔 Subagent notification: Task done.");
   });
 
-  it("truncates long content to 200 chars", () => {
+  it("truncates long content to 200 chars with ellipsis", () => {
     const long = "x".repeat(300);
     const entry = makeCustomMessageEntry("subagent-notify", true, undefined, long);
     const result = formatNotification(entry);
     expect(result).toContain("🔔 Subagent notification:");
-    expect(result.length).toBeLessThanOrEqual("🔔 Subagent notification: ".length + 200 + 5);
+    expect(result).toContain("…");
+    // prefix + 200 chars + ellipsis
+    expect(result.endsWith("…")).toBe(true);
+    const textPart = result.replace("🔔 Subagent notification: ", "").replace("…", "");
+    expect(textPart.length).toBe(200);
   });
 
   it("returns fallback when entry has no useful text", () => {
