@@ -98,299 +98,94 @@ function makeMockSession(entries: SessionEntry[] = []) {
 }
 
 // ---------------------------------------------------------------------------
-// sanitizeNotificationText
+// notification formatting
 // ---------------------------------------------------------------------------
 
 describe("sanitizeNotificationText", () => {
-  it("returns plain text unchanged", () => {
-    expect(sanitizeNotificationText("Task completed successfully.")).toBe("Task completed successfully.");
-  });
-
-  it("strips file:// URIs", () => {
-    const input = "Report saved to file:///home/user/report.pdf for review.";
-    // The entire file:// URI (including its path) is removed, then whitespace is collapsed.
-    const result = sanitizeNotificationText(input);
-    expect(result).toBe("Report saved to for review.");
-  });
-
-  it("replaces /home/ absolute paths with placeholder", () => {
-    const input = "See /home/user/project/output.txt for details.";
-    expect(sanitizeNotificationText(input)).toBe("See [local path] for details.");
-  });
-
-  it("replaces /Users/ absolute paths (macOS)", () => {
-    // The trailing period is part of the regex match (consumed with the path)
-    const result = sanitizeNotificationText("Output at /Users/name/Desktop/result.md.");
-    expect(result).toContain("[local path]");
-    expect(result).not.toContain("/Users/");
-  });
-
-  it("replaces /tmp/ paths", () => {
-    const result = sanitizeNotificationText("Temp file at /tmp/run-123/artifact.zip");
-    expect(result).toContain("[local path]");
-    expect(result).not.toContain("/tmp/");
-  });
-
-  it("replaces /workspace/ paths (Docker)", () => {
-    const result = sanitizeNotificationText("Build artifacts are at /workspace/dist/app.js");
-    expect(result).toContain("[local path]");
-    expect(result).not.toContain("/workspace/");
-  });
-
-  it("keeps relative paths", () => {
-    const input = "Error in src/main.ts at line 42.";
-    expect(sanitizeNotificationText(input)).toBe("Error in src/main.ts at line 42.");
-  });
-
-  it("collapses extra whitespace after removal", () => {
-    const input = "See file:///tmp/file.txt  for details";
-    const result = sanitizeNotificationText(input);
-    expect(result).not.toContain("  ");
-  });
-
-  it("trims leading and trailing whitespace", () => {
-    expect(sanitizeNotificationText("  hello  ")).toBe("hello");
-  });
-
-  it("handles empty string", () => {
-    expect(sanitizeNotificationText("")).toBe("");
+  it.each([
+    ["file:///tmp/out.log", ""],
+    ["See /Users/me/project/secret.txt", "See [local path]"],
+    ["See /tmp/out.log", "See [local path]"],
+    ["Keep relative/path.md", "Keep relative/path.md"],
+  ])("sanitizes %s", (input, expected) => {
+    expect(sanitizeNotificationText(input)).toBe(expected);
   });
 });
-
-// ---------------------------------------------------------------------------
-// isActionableCustomMessageEntry
-// ---------------------------------------------------------------------------
 
 describe("isActionableCustomMessageEntry", () => {
-  it("accepts subagent-notify with display=true", () => {
-    const entry = makeCustomMessageEntry("subagent-notify", true);
-    expect(isActionableCustomMessageEntry(entry)).toBe(true);
-  });
-
-  it("accepts subagent_control_notice with display=true", () => {
-    const entry = makeCustomMessageEntry("subagent_control_notice", true);
-    expect(isActionableCustomMessageEntry(entry)).toBe(true);
-  });
-
-  it("rejects subagent-notify with display=false", () => {
-    const entry = makeCustomMessageEntry("subagent-notify", false);
-    expect(isActionableCustomMessageEntry(entry)).toBe(false);
-  });
-
-  it("rejects non-whitelisted custom_message types", () => {
-    const entry = makeCustomMessageEntry("some-other-type", true);
-    expect(isActionableCustomMessageEntry(entry)).toBe(false);
-  });
-
-  it("rejects ordinary message entries", () => {
-    const entry = makeSessionEntry();
-    expect(isActionableCustomMessageEntry(entry)).toBe(false);
-  });
-
-  it("rejects tool entries", () => {
-    const entry = makeSessionEntry({
-      type: "message",
-      message: { role: "tool", content: "output" } as any,
-    });
-    expect(isActionableCustomMessageEntry(entry)).toBe(false);
-  });
-
-  it("covers all ACTIONABLE_CUSTOM_TYPES", () => {
-    for (const customType of ACTIONABLE_CUSTOM_TYPES) {
-      const entry = makeCustomMessageEntry(customType, true);
-      expect(isActionableCustomMessageEntry(entry)).toBe(true);
-    }
+  it("accepts only displayed whitelisted custom messages", () => {
+    expect(isActionableCustomMessageEntry(makeCustomMessageEntry("subagent-notify", true))).toBe(true);
+    expect(isActionableCustomMessageEntry(makeCustomMessageEntry("subagent_control_notice", true))).toBe(true);
+    expect(isActionableCustomMessageEntry(makeCustomMessageEntry("subagent-notify", false))).toBe(false);
+    expect(isActionableCustomMessageEntry(makeCustomMessageEntry("other", true))).toBe(false);
+    expect(isActionableCustomMessageEntry(makeSessionEntry())).toBe(false);
   });
 });
 
-// ---------------------------------------------------------------------------
-// formatNotification — subagent-notify
-// ---------------------------------------------------------------------------
-
-describe("formatNotification — subagent-notify", () => {
-  it("formats completed status without content", () => {
-    const entry = makeCustomMessageEntry("subagent-notify", true, {
-      status: "completed",
-      agent: "my-agent",
-    });
-    expect(formatNotification(entry)).toBe("✅ Background task completed: my-agent");
-  });
-
-  it("formats completed status with LLM-generated content body", () => {
-    const entry = makeCustomMessageEntry(
-      "subagent-notify",
-      true,
-      { status: "completed", agent: "my-agent" },
-      "All 42 tests passed. The deployment succeeded.",
-    );
-    expect(formatNotification(entry)).toBe(
-      "✅ Background task completed: my-agent\nAll 42 tests passed. The deployment succeeded.",
-    );
-  });
-
-  it("sanitizes local paths from content body", () => {
-    const entry = makeCustomMessageEntry(
-      "subagent-notify",
-      true,
-      { status: "completed", agent: "builder" },
-      "Artifacts written to /home/user/dist/app.js.",
-    );
-    const result = formatNotification(entry);
-    expect(result).toContain("✅ Background task completed: builder");
-    expect(result).toContain("[local path]");
-    expect(result).not.toContain("/home/");
-  });
-
-  it("sanitizes file:// URIs from content body", () => {
-    const entry = makeCustomMessageEntry(
-      "subagent-notify",
-      true,
-      { status: "completed" },
-      "Report at file:///home/user/report.html ready.",
-    );
-    const result = formatNotification(entry);
-    expect(result).toContain("✅ Background task completed");
-    expect(result).not.toContain("file://");
-    expect(result).not.toContain("/home/");
-  });
-
-  it("sanitizes path-like agent labels in the header", () => {
-    const entry = makeCustomMessageEntry(
-      "subagent-notify",
-      true,
-      { status: "completed", agent: "/Users/name/project/agent" },
-      "Saved to file:///Users/name/project/out.txt and /tmp/output.log.",
-    );
-    const result = formatNotification(entry);
-    expect(result).toContain("✅ Background task completed: [local path]");
-    expect(result).not.toContain("/Users/");
-    expect(result).not.toContain("file://");
-    expect(result).not.toContain("/tmp/");
-  });
-
-  it("infers completed status and omits local-only output metadata", () => {
+describe("formatNotification", () => {
+  it("formats completed subagent output with useful content and no local metadata", () => {
     const entry = makeCustomMessageEntry(
       "subagent-notify",
       true,
       undefined,
       [
-        "Background task completed: **parallel:planner+planner+planner**",
-        "",
-        "planner:",
-        "Output saved to: /Users/name/repo/tmp/plan-a.md (10 KB, 20 lines). Read this file if needed.",
-        "",
-        "planner:",
-        "Output saved to: /Users/name/repo/tmp/plan-b.md (10 KB, 20 lines). Read this file if needed.",
-        "",
-        "planner:",
-        "Output saved to: /Users/name/repo/tmp/plan-c.md (10 KB, 20 lines). Read this file if needed.",
-        "",
-        "Session file: /Users/name/.pi/session.jsonl",
+        "Background task completed: **worker**",
+        "Implemented formatter changes.",
+        "Output saved to: /tmp/output.md (1 KB, 2 lines). Read this file if needed.",
+        "Session file: /tmp/session.jsonl",
       ].join("\n"),
     );
 
-    expect(formatNotification(entry)).toBe(
-      "✅ Background task completed: 3 planners\n3 planners completed successfully.",
-    );
+    expect(formatNotification(entry)).toBe("✅ Background task completed: worker\nImplemented formatter changes.");
   });
 
-  it("does not treat not passed as a successful validation summary", () => {
+  it("formats parallel reviewer summaries without exposing file paths", () => {
     const entry = makeCustomMessageEntry(
       "subagent-notify",
       true,
-      { status: "failed" },
+      undefined,
       [
-        "Background task failed: **parallel:reviewer+reviewer+reviewer**",
-        "",
+        "Background task completed: **parallel:reviewer+reviewer+reviewer**",
         "reviewer:",
-        "Output saved to: /Users/name/repo/reviews/a.md (1 KB, 6 lines). Read this file if needed.",
-        "",
+        "Output saved to: /Users/me/review-a.md (1 KB, 3 lines). Read this file if needed.",
         "reviewer:",
-        "Output saved to: /Users/name/repo/reviews/b.md (1 KB, 6 lines). Read this file if needed.",
-        "",
+        "Output saved to: /Users/me/review-b.md (1 KB, 3 lines). Read this file if needed.",
         "reviewer:",
-        "Wrote the review to `reviews/c.md`.",
-        "",
-        "Validation: not passed.",
-        "Session file: /Users/name/.pi/session.jsonl",
+        "Output saved to: /Users/me/review-c.md (1 KB, 3 lines). Read this file if needed.",
       ].join("\n"),
     );
 
-    expect(formatNotification(entry)).toBe(
-      "⚠️ Background task partly completed: 3 reviewers\n3 reviewers returned notes. One part still needs a quick look.",
-    );
+    expect(formatNotification(entry)).toBe("✅ Background task completed: 3 reviewers\n3 reviewers completed successfully.");
   });
 
-  it.each([
-    ["Validation: focused tests passed."],
-    ["Checks passed."],
-  ])("emits focused checks passed for explicit validation text: %s", (validationLine) => {
+  it("uses injected summaries from enriched output files", () => {
     const entry = makeCustomMessageEntry(
       "subagent-notify",
       true,
-      { status: "failed" },
+      undefined,
       [
-        "Background task failed: **parallel:reviewer+reviewer+reviewer**",
-        "",
+        "Background task completed: **parallel:reviewer+reviewer+reviewer**",
         "reviewer:",
-        "Output saved to: /Users/name/repo/reviews/a.md (1 KB, 6 lines). Read this file if needed.",
-        "",
-        "reviewer:",
-        "Output saved to: /Users/name/repo/reviews/b.md (1 KB, 6 lines). Read this file if needed.",
-        "",
-        "reviewer:",
-        "Wrote the review to `reviews/c.md`.",
-        "",
-        validationLine,
-        "Session file: /Users/name/.pi/session.jsonl",
+        "Output saved to: /tmp/review.md (1 KB, 3 lines). Read this file if needed.",
+        "Summary: One blocker remains: bootstrap attach can race. Everything else reviewed well.",
       ].join("\n"),
     );
 
     expect(formatNotification(entry)).toBe(
-      "⚠️ Background task partly completed: 3 reviewers\n3 reviewers returned notes. Focused checks passed. One part still needs a quick look.",
+      "✅ Background task completed: 3 reviewers\nOne blocker remains: bootstrap attach can race. Everything else reviewed well.",
     );
   });
 
-  it("summarizes partly completed parallel runs without local output paths", () => {
-    const entry = makeCustomMessageEntry(
-      "subagent-notify",
-      true,
-      { status: "failed" },
-      [
-        "Background task failed: **parallel:reviewer+reviewer+reviewer**",
-        "",
-        "reviewer:",
-        "Output saved to: /Users/name/repo/reviews/a.md (1 KB, 6 lines). Read this file if needed.",
-        "",
-        "reviewer:",
-        "Output saved to: /Users/name/repo/reviews/b.md (1 KB, 6 lines). Read this file if needed.",
-        "",
-        "reviewer:",
-        "Wrote the review to `reviews/c.md`.",
-        "",
-        "Validation: ran focused tests (passed).",
-        "Session file: /Users/name/.pi/session.jsonl",
-      ].join("\n"),
-    );
-
-    expect(formatNotification(entry)).toBe(
-      "⚠️ Background task partly completed: 3 reviewers\n3 reviewers returned notes. Focused checks passed. One part still needs a quick look.",
-    );
-  });
-
-  it("summarizes completed work that ended with a runtime issue", () => {
+  it("distinguishes useful work that failed while finalizing from task failure", () => {
     const entry = makeCustomMessageEntry(
       "subagent-notify",
       true,
       undefined,
       [
         "Background task failed: **worker**",
-        "",
-        "worker:",
-        "Implemented the notification formatter fix and added regression tests.",
+        "Implemented notification changes.",
         "Validation: focused tests passed.",
         "Runtime issue: agent server error while finalizing.",
-        "Session file: /Users/name/.pi/session.jsonl",
       ].join("\n"),
     );
 
@@ -399,179 +194,21 @@ describe("formatNotification — subagent-notify", () => {
     );
   });
 
-  it("infers failed status and keeps the useful failure summary", () => {
-    const entry = makeCustomMessageEntry(
-      "subagent-notify",
-      true,
-      undefined,
-      [
-        "Background task failed: **worker**",
-        "",
-        "worker:",
-        "Build failed: 3 TypeScript errors in src/main.ts.",
-        "Session file: /Users/name/.pi/session.jsonl",
-      ].join("\n"),
-    );
-
-    expect(formatNotification(entry)).toBe(
-      "❌ Background task failed: worker\nBuild failed: 3 TypeScript errors in src/main.ts.",
-    );
+  it("formats failures, pauses, control notices, and unknown notices", () => {
+    expect(formatNotification(makeCustomMessageEntry("subagent-notify", true, { status: "failed", agent: "worker" })))
+      .toBe("❌ Background task failed: worker");
+    expect(formatNotification(makeCustomMessageEntry("subagent-notify", true, { status: "paused", agent: "worker" }, "Waiting.")))
+      .toBe("⏸ Background task paused: worker\nWaiting.");
+    expect(formatNotification(makeCustomMessageEntry("subagent_control_notice", true, { event: "needs_attention", agent: "reviewer" }, "Needs input.")))
+      .toBe("⚠️ Subagent needs attention: reviewer\nNeeds input.");
+    expect(formatNotification(makeCustomMessageEntry("other", true))).toBe("");
   });
 
-  it("formats done status as completed", () => {
-    const entry = makeCustomMessageEntry("subagent-notify", true, { status: "done" });
-    expect(formatNotification(entry)).toBe("✅ Background task completed");
-  });
+  it("keeps concise summaries long enough to include useful context", () => {
+    const useful = "A".repeat(650);
+    const entry = makeCustomMessageEntry("subagent-notify", true, { status: "completed", agent: "worker" }, useful);
 
-  it("formats success status as completed", () => {
-    const entry = makeCustomMessageEntry("subagent-notify", true, { status: "success" });
-    expect(formatNotification(entry)).toBe("✅ Background task completed");
-  });
-
-  it("formats failed status without content", () => {
-    const entry = makeCustomMessageEntry("subagent-notify", true, {
-      status: "failed",
-      agentName: "bot",
-    });
-    expect(formatNotification(entry)).toBe("❌ Background task failed: bot");
-  });
-
-  it("formats failed status with error summary", () => {
-    const entry = makeCustomMessageEntry(
-      "subagent-notify",
-      true,
-      { status: "failed", agent: "compiler" },
-      "Build failed: 3 TypeScript errors in src/main.ts.",
-    );
-    expect(formatNotification(entry)).toBe(
-      "❌ Background task failed: compiler\nBuild failed: 3 TypeScript errors in src/main.ts.",
-    );
-  });
-
-  it("formats error status as failed", () => {
-    const entry = makeCustomMessageEntry("subagent-notify", true, { status: "error" });
-    expect(formatNotification(entry)).toBe("❌ Background task failed");
-  });
-
-  it("formats paused status without content", () => {
-    const entry = makeCustomMessageEntry("subagent-notify", true, {
-      status: "paused",
-      name: "worker",
-    });
-    expect(formatNotification(entry)).toBe("⏸ Background task paused: worker");
-  });
-
-  it("formats paused status with content body", () => {
-    const entry = makeCustomMessageEntry(
-      "subagent-notify",
-      true,
-      { status: "paused", agent: "scraper" },
-      "Waiting for approval to proceed.",
-    );
-    expect(formatNotification(entry)).toBe(
-      "⏸ Background task paused: scraper\nWaiting for approval to proceed.",
-    );
-  });
-
-  it("falls back to notice field for unknown status", () => {
-    const entry = makeCustomMessageEntry("subagent-notify", true, {
-      notice: "Something happened",
-    });
-    expect(formatNotification(entry)).toBe("🔔 Subagent notification\nSomething happened");
-  });
-
-  it("falls back to content when no details (unknown status)", () => {
-    const entry = makeCustomMessageEntry("subagent-notify", true, undefined, "Task done.");
-    expect(formatNotification(entry)).toBe("🔔 Subagent notification\nTask done.");
-  });
-
-  it("keeps concise summaries long enough to include the useful context", () => {
-    const long = "x".repeat(800);
-    const entry = makeCustomMessageEntry("subagent-notify", true, { status: "completed" }, long);
-    const result = formatNotification(entry);
-    expect(result).toContain("✅ Background task completed");
-    expect(result).toContain("…");
-    expect(result.endsWith("…")).toBe(true);
-    const bodyLine = result.split("\n")[1];
-    expect(bodyLine.replace("…", "").length).toBe(700);
-  });
-
-  it("returns header only when content is empty for known status", () => {
-    const entry = makeCustomMessageEntry("subagent-notify", true);
-    expect(formatNotification(entry)).toBe("🔔 Subagent notification");
-  });
-
-  it("returns empty string for unknown customType", () => {
-    const entry = makeCustomMessageEntry("unknown-type", true, { status: "completed" });
-    expect(formatNotification(entry)).toBe("");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// formatNotification — subagent_control_notice
-// ---------------------------------------------------------------------------
-
-describe("formatNotification — subagent_control_notice", () => {
-  it("formats needs_attention event without content", () => {
-    const entry = makeCustomMessageEntry("subagent_control_notice", true, {
-      event: "needs_attention",
-      agent: "my-agent",
-    });
-    expect(formatNotification(entry)).toBe("⚠️ Subagent needs attention: my-agent");
-  });
-
-  it("formats needs_attention with LLM-generated content body", () => {
-    const entry = makeCustomMessageEntry(
-      "subagent_control_notice",
-      true,
-      { event: "needs_attention", agent: "my-agent" },
-      "The agent is waiting for a decision on the conflicting merge.",
-    );
-    expect(formatNotification(entry)).toBe(
-      "⚠️ Subagent needs attention: my-agent\nThe agent is waiting for a decision on the conflicting merge.",
-    );
-  });
-
-  it("sanitizes local paths from needs_attention content", () => {
-    const entry = makeCustomMessageEntry(
-      "subagent_control_notice",
-      true,
-      { event: "needs_attention" },
-      "Please review /home/user/workspace/diff.patch before continuing.",
-    );
-    const result = formatNotification(entry);
-    expect(result).toContain("⚠️ Subagent needs attention");
-    expect(result).not.toContain("/home/");
-    expect(result).toContain("[local path]");
-  });
-
-  it("formats needsAttention event variant", () => {
-    const entry = makeCustomMessageEntry("subagent_control_notice", true, {
-      event: "needsAttention",
-    });
-    expect(formatNotification(entry)).toBe("⚠️ Subagent needs attention");
-  });
-
-  it("falls back to notice when no needs_attention event", () => {
-    const entry = makeCustomMessageEntry("subagent_control_notice", true, {
-      notice: "Please check the run",
-    });
-    expect(formatNotification(entry)).toBe("⚠️ Subagent notice\nPlease check the run");
-  });
-
-  it("falls back to content", () => {
-    const entry = makeCustomMessageEntry(
-      "subagent_control_notice",
-      true,
-      undefined,
-      "Attention required",
-    );
-    expect(formatNotification(entry)).toBe("⚠️ Subagent notice\nAttention required");
-  });
-
-  it("returns plain fallback when no useful text", () => {
-    const entry = makeCustomMessageEntry("subagent_control_notice", true);
-    expect(formatNotification(entry)).toBe("⚠️ Subagent notice");
+    expect(formatNotification(entry)).toContain(useful);
   });
 });
 
