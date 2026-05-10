@@ -2,7 +2,7 @@ import type { AgentSession } from "@mariozechner/pi-coding-agent";
 import type { CustomMessageEntry, SessionEntry } from "@mariozechner/pi-coding-agent";
 
 /**
- * Maximum character length for the text portion of a notification message.
+ * Maximum character length for the text portion of a notification body.
  */
 const MAX_NOTIFICATION_TEXT_LENGTH = 200;
 
@@ -27,6 +27,25 @@ export function isActionableCustomMessageEntry(entry: SessionEntry): entry is Cu
     (entry as CustomMessageEntry).display === true &&
     ACTIONABLE_CUSTOM_TYPES.has((entry as CustomMessageEntry).customType)
   );
+}
+
+/**
+ * Strip content that is not actionable from a remote Telegram client.
+ *
+ * Removes:
+ * - `file://` URIs (local file references)
+ * - Absolute local paths (e.g. /home/user/…, /Users/name/…, /tmp/…)
+ *
+ * Relative paths such as `src/main.ts` are kept as they are descriptive.
+ */
+export function sanitizeNotificationText(text: string): string {
+  return text
+    // Remove file:// URIs
+    .replace(/file:\/\/[^\s\)\"'>\]]+/g, "")
+    // Replace common absolute local paths with a placeholder
+    .replace(/\/(home|Users|tmp|workspace|var|usr|private|opt|Applications|System)\/[^\s\)\"\',;\n<>]*/g, "[local path]")
+    .replace(/\s{2,}/g, " ")
+    .trim();
 }
 
 /**
@@ -57,23 +76,43 @@ function getStringDetail(details: unknown, ...keys: string[]): string | undefine
   return undefined;
 }
 
+/**
+ * Append the LLM-generated content body (the Pi display text) to a header line.
+ *
+ * The body is sanitized to remove local-only paths before delivery and is
+ * truncated to MAX_NOTIFICATION_TEXT_LENGTH characters if necessary.
+ */
+function appendBody(header: string, entry: CustomMessageEntry): string {
+  const rawBody = typeof entry.content === "string" ? entry.content.trim() : "";
+  const body = sanitizeNotificationText(rawBody);
+  if (!body) {
+    return header;
+  }
+  const truncated = body.length > MAX_NOTIFICATION_TEXT_LENGTH
+    ? `${body.slice(0, MAX_NOTIFICATION_TEXT_LENGTH)}…`
+    : body;
+  return `${header}\n${truncated}`;
+}
+
 function formatSubagentNotify(entry: CustomMessageEntry): string {
   const agent = getStringDetail(entry.details, "agent", "agentName", "name");
   const status = getStringDetail(entry.details, "status", "state");
-  const notice = getStringDetail(entry.details, "notice", "message", "summary");
   const suffix = agent ? `: ${agent}` : "";
 
   if (status === "completed" || status === "done" || status === "success") {
-    return `✅ Background task completed${suffix}`;
+    return appendBody(`✅ Background task completed${suffix}`, entry);
   }
   if (status === "failed" || status === "error") {
-    return `❌ Background task failed${suffix}`;
+    return appendBody(`❌ Background task failed${suffix}`, entry);
   }
   if (status === "paused") {
-    return `⏸ Background task paused${suffix}`;
+    return appendBody(`⏸ Background task paused${suffix}`, entry);
   }
 
-  const text = notice ?? (typeof entry.content === "string" ? entry.content.trim() : "");
+  // Unknown status — use the sanitized content/notice as an inline body.
+  const notice = getStringDetail(entry.details, "notice", "message", "summary");
+  const rawText = typeof entry.content === "string" ? entry.content.trim() : "";
+  const text = sanitizeNotificationText(notice ?? rawText);
   if (!text) {
     return `🔔 Subagent notification${suffix}`;
   }
@@ -84,16 +123,18 @@ function formatSubagentNotify(entry: CustomMessageEntry): string {
 }
 
 function formatControlNotice(entry: CustomMessageEntry): string {
-  const agent = getStringDetail(entry.details, "agent", "agentName", "name", "run");
+  const agent = getStringDetail(entry.details, "agent", "agentName", "name");
   const event = getStringDetail(entry.details, "event", "eventType");
-  const notice = getStringDetail(entry.details, "notice", "message", "summary");
   const suffix = agent ? `: ${agent}` : "";
 
   if (event?.includes("needs_attention") || event?.includes("needsAttention")) {
-    return `⚠️ Subagent needs attention${suffix}`;
+    return appendBody(`⚠️ Subagent needs attention${suffix}`, entry);
   }
 
-  const text = notice ?? (typeof entry.content === "string" ? entry.content.trim() : "");
+  // For other control notices, use content/notice as an inline body.
+  const notice = getStringDetail(entry.details, "notice", "message", "summary");
+  const rawText = typeof entry.content === "string" ? entry.content.trim() : "";
+  const text = sanitizeNotificationText(notice ?? rawText);
   if (!text) {
     return `⚠️ Subagent notice${suffix}`;
   }
