@@ -264,6 +264,7 @@ function createMockPiSession(overrides: Partial<PiSessionService> = {}) {
         }
       };
     }),
+    attachNotificationWatcher: vi.fn(),
     dispose: vi.fn(),
   } satisfies Partial<PiSessionService>;
 
@@ -332,6 +333,7 @@ function createMockPiSessionRegistry(options: SetupOptions = {}) {
       services.delete(contextKey);
     }),
     dispose: vi.fn(),
+    registerNotificationSender: vi.fn(),
   } satisfies Partial<PiSessionRegistry>;
 
   return {

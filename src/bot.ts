@@ -67,6 +67,15 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
   const bot = new Bot<Context>(config.telegramBotToken);
   bot.api.config.use(autoRetry({ maxRetryAttempts: 3, maxDelaySeconds: 10 }));
 
+  // Register a proactive notification sender so the registry can forward
+  // actionable Pi session events (e.g. subagent-notify) to the correct
+  // Telegram chat/topic without requiring an active user prompt.
+  sessionRegistry.registerNotificationSender((context, text) => {
+    void sendTextMessage(bot.api, context, text, { fallbackText: text }).catch((error) => {
+      console.error("Failed to send proactive session notification:", error);
+    });
+  });
+
   const chatState = createBotChatState();
 
   const pendingSessionPicks = new Map<ContextKey, Array<{ path: string; cwd: string }>>();

@@ -33,6 +33,11 @@ import {
   resolveSessionPathForRuntime,
   resolveWorkspacePathForRuntime,
 } from "./pi-session-paths.js";
+import {
+  createSessionNotificationWatcher,
+  type NotificationSend,
+} from "./session-notification-watcher.js";
+import { NotificationDedupeStore } from "./session-notification-dedupe.js";
 
 /**
  * Default timeout (seconds) for bash commands in TelePi sessions.
@@ -362,6 +367,12 @@ export class PiSessionService {
   private sessionUnsubscribe?: () => void;
   private extensionBindings?: Parameters<AgentSession["bindExtensions"]>[0];
 
+  // Notification watcher — long-lived, per-chat/topic, rebound on session change.
+  private notificationSend?: NotificationSend;
+  private notificationIsAlreadySeen?: (id: string) => boolean;
+  private notificationMarkSeen?: (id: string) => void;
+  private notificationUnsubscribe?: () => void;
+
   private constructor(private readonly config: TelePiConfig) {
     this.currentWorkspace = config.workspace;
   }
@@ -429,6 +440,26 @@ export class PiSessionService {
         this.sessionUnsubscribe = undefined;
       }
     };
+  }
+
+  /**
+   * Attach a long-lived notification watcher for this chat/topic session.
+   *
+   * The watcher is rebound automatically whenever the underlying Pi session
+   * changes (newSession, switchSession, fork, reload). The dedupe callbacks
+   * `isAlreadySeen` and `markSeen` are provided by the caller (typically the
+   * PiSessionRegistry) so that deduplication state persists across session
+   * replacements and bot restarts.
+   */
+  attachNotificationWatcher(
+    send: NotificationSend,
+    isAlreadySeen: (id: string) => boolean,
+    markSeen: (id: string) => void,
+  ): void {
+    this.notificationSend = send;
+    this.notificationIsAlreadySeen = isAlreadySeen;
+    this.notificationMarkSeen = markSeen;
+    this.rebindNotificationWatcher();
   }
 
   async prompt(text: string): Promise<void> {
@@ -851,6 +882,8 @@ export class PiSessionService {
     const previousHandle = this.handle;
     this.sessionUnsubscribe?.();
     this.sessionUnsubscribe = undefined;
+    this.notificationUnsubscribe?.();
+    this.notificationUnsubscribe = undefined;
     this.handle = undefined;
 
     try {
@@ -865,6 +898,8 @@ export class PiSessionService {
   dispose(): void {
     this.sessionUnsubscribe?.();
     this.sessionUnsubscribe = undefined;
+    this.notificationUnsubscribe?.();
+    this.notificationUnsubscribe = undefined;
 
     const handle = this.handle;
     this.handle = undefined;
@@ -972,6 +1007,23 @@ export class PiSessionService {
 
     await this.bindExtensionsToCurrentSession();
     this.rebindSessionSubscription();
+    this.rebindNotificationWatcher();
+  }
+
+  private rebindNotificationWatcher(): void {
+    this.notificationUnsubscribe?.();
+    this.notificationUnsubscribe = undefined;
+
+    if (!this.notificationSend || !this.notificationIsAlreadySeen || !this.notificationMarkSeen || !this.handle) {
+      return;
+    }
+
+    this.notificationUnsubscribe = createSessionNotificationWatcher(
+      this.getSession(),
+      this.notificationIsAlreadySeen,
+      this.notificationMarkSeen,
+      this.notificationSend,
+    );
   }
 }
 
@@ -984,6 +1036,8 @@ export class PiSessionRegistry {
   private readonly inflight = new Map<string, Promise<PiSessionService>>();
   private readonly generations = new Map<string, number>();
   private bootstrapSessionPath?: string;
+  private notificationSender?: (context: PiSessionContext, text: string) => void;
+  private readonly dedupeStore = NotificationDedupeStore.createDefault();
 
   private constructor(private readonly config: TelePiConfig) {
     this.bootstrapSessionPath = config.piSessionPath;
@@ -991,6 +1045,18 @@ export class PiSessionRegistry {
 
   static async create(config: TelePiConfig): Promise<PiSessionRegistry> {
     return new PiSessionRegistry(config);
+  }
+
+  /**
+   * Register a Telegram send function for proactive session notifications.
+   *
+   * Must be called once after the bot API is available. The sender is invoked
+   * with the Telegram context and formatted notification text whenever an
+   * actionable custom message (e.g. subagent-notify, subagent_control_notice)
+   * is received on any attached Pi session.
+   */
+  registerNotificationSender(sender: (context: PiSessionContext, text: string) => void): void {
+    this.notificationSender = sender;
   }
 
   has(context: PiSessionContext): boolean {
@@ -1039,6 +1105,7 @@ export class PiSessionRegistry {
         }
 
         this.services.set(key, service);
+        this.attachNotificationWatcher(context, key, service);
         return service;
       })
       .catch((error) => {
@@ -1069,6 +1136,26 @@ export class PiSessionRegistry {
     }
     this.services.clear();
     this.inflight.clear();
+    this.dedupeStore.dispose();
+  }
+
+  private attachNotificationWatcher(
+    context: PiSessionContext,
+    contextKey: string,
+    service: PiSessionService,
+  ): void {
+    if (!this.notificationSender) {
+      return;
+    }
+
+    const sender = this.notificationSender;
+    service.attachNotificationWatcher(
+      (text) => {
+        sender(context, text);
+      },
+      (id) => this.dedupeStore.has(contextKey, id),
+      (id) => this.dedupeStore.add(contextKey, id),
+    );
   }
 
   private createServiceConfig(): TelePiConfig {
