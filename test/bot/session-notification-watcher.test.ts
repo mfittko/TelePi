@@ -210,6 +210,14 @@ describe("formatNotification", () => {
 
     expect(formatNotification(entry)).toContain(useful);
   });
+
+  it("keeps truncated notifications within the configured maximum length", () => {
+    const entry = makeCustomMessageEntry("subagent-notify", true, { status: "completed", agent: "worker" }, "A".repeat(800));
+    const summary = formatNotification(entry).split("\n")[1];
+
+    expect(summary).toHaveLength(700);
+    expect(summary.endsWith("…")).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -815,6 +823,27 @@ describe("createSessionNotificationWatcher — live events", () => {
         role: "custom",
         customType: "subagent-notify",
         display: false,
+        timestamp: Date.now(),
+      },
+    });
+
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("does not deliver non-displayed session entries for live display=true events", () => {
+    const hiddenEntry = makeCustomMessageEntry("subagent-notify", false, { status: "completed", agent: "hidden" });
+    const session = makeMockSession([hiddenEntry]);
+    const send = vi.fn().mockResolvedValue(undefined);
+    const seen = new Set<string>();
+
+    createSessionNotificationWatcher(session as any, (id) => seen.has(id), (id) => seen.add(id), send);
+
+    session.emit({
+      type: "message_end",
+      message: {
+        role: "custom",
+        customType: "subagent-notify",
+        display: true,
         timestamp: Date.now(),
       },
     });

@@ -442,7 +442,9 @@ export function createSessionNotificationWatcher(
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i];
       if (entry.type === "custom_message" && (entry as CustomMessageEntry).customType === message.customType) {
-        tryDeliverEntry(entry as CustomMessageEntry, isAlreadySeen, markSeen, send, inFlight);
+        if (isActionableCustomMessageEntry(entry)) {
+          tryDeliverEntry(entry, isAlreadySeen, markSeen, send, inFlight);
+        }
         return;
       }
     }

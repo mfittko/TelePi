@@ -169,6 +169,26 @@ describe("NotificationDedupeStore", () => {
     expect(store.has("ctx-1", `entry-${MAX_KEYS_PER_CONTEXT + 1}`)).toBe(true);
   });
 
+  it("trims preserved on-disk context keys when flushing unrelated contexts", () => {
+    const { filePath } = track(makeTempStore());
+    writeFileSync(
+      filePath,
+      JSON.stringify({
+        "ctx-1": Array.from({ length: MAX_KEYS_PER_CONTEXT + 2 }, (_value, index) => `entry-${index}`),
+      }),
+      "utf8",
+    );
+
+    const store = new NotificationDedupeStore(filePath);
+    store.add("ctx-2", "entry-b");
+    store.flush();
+
+    const raw = JSON.parse(readFileSync(filePath, "utf8"));
+    expect(raw["ctx-1"]).toHaveLength(MAX_KEYS_PER_CONTEXT);
+    expect(raw["ctx-1"][0]).toBe("entry-2");
+    expect(raw["ctx-2"]).toContain("entry-b");
+  });
+
   it("flush preserves on-disk context keys not loaded in the current instance", () => {
     const { store: store1, filePath, dir } = track(makeTempStore());
     dirs.push(dir);

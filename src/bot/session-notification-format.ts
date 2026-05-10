@@ -35,7 +35,7 @@ export function sanitizeNotificationText(text: string): string {
 
 function truncateNotificationText(text: string): string {
   return text.length > MAX_NOTIFICATION_TEXT_LENGTH
-    ? `${text.slice(0, MAX_NOTIFICATION_TEXT_LENGTH)}…`
+    ? `${text.slice(0, MAX_NOTIFICATION_TEXT_LENGTH - 1)}…`
     : text;
 }
 

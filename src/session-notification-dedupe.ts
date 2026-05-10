@@ -17,6 +17,16 @@ const FLUSH_DELAY_MS = 1000;
 
 type RawStore = Record<string, string[]>;
 
+function trimRawStore(store: RawStore): RawStore {
+  const trimmed: RawStore = {};
+  for (const [key, ids] of Object.entries(store)) {
+    if (Array.isArray(ids)) {
+      trimmed[key] = ids.slice(-MAX_KEYS_PER_CONTEXT);
+    }
+  }
+  return trimmed;
+}
+
 /**
  * Persisted, bounded dedupe store for session notification IDs.
  *
@@ -98,7 +108,7 @@ export class NotificationDedupeStore {
     }
 
     // Overwrite with in-memory state (which may have newer/more entries).
-    const store: RawStore = { ...baseStore };
+    const store: RawStore = trimRawStore(baseStore);
     for (const [key, ids] of this.inMemory) {
       const arr = [...ids];
       // Trim to the most recent MAX_KEYS_PER_CONTEXT entries.
