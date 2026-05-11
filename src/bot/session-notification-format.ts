@@ -1,6 +1,8 @@
 import type { CustomMessageEntry } from "@mariozechner/pi-coding-agent";
 
 const MAX_NOTIFICATION_TEXT_LENGTH = 700;
+const MAX_SUMMARY_ITEMS = 3;
+const MAX_SUMMARY_ITEM_LENGTH = 220;
 
 export interface SessionNotificationFormatResult {
   header: string;
@@ -25,12 +27,42 @@ function getStringDetail(details: unknown, ...keys: string[]): string | undefine
   return undefined;
 }
 
+function normalizeNotificationWhitespace(text: string): string {
+  const lines = text
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/\t/g, " ").replace(/ {2,}/g, " ").trim());
+
+  const collapsed: string[] = [];
+  let previousWasBlank = false;
+
+  for (const line of lines) {
+    if (!line) {
+      if (collapsed.length === 0 || previousWasBlank) {
+        continue;
+      }
+      collapsed.push("");
+      previousWasBlank = true;
+      continue;
+    }
+
+    collapsed.push(line);
+    previousWasBlank = false;
+  }
+
+  while (collapsed.at(-1) === "") {
+    collapsed.pop();
+  }
+
+  return collapsed.join("\n").trim();
+}
+
 export function sanitizeNotificationText(text: string): string {
-  return text
-    .replace(/file:\/\/[^\s\)\"'>\]]+/g, "")
-    .replace(/\/(home|Users|tmp|workspace|var|usr|private|opt|Applications|System)\/[^\s\)\"',;\n<>]*/g, "[local path]")
-    .replace(/\s{2,}/g, " ")
-    .trim();
+  return normalizeNotificationWhitespace(
+    text
+      .replace(/file:\/\/[^\s\)\"'>\]]+/g, "")
+      .replace(/\/(home|Users|tmp|workspace|var|usr|private|opt|Applications|System)\/[^\s\)\"',;\n<>]*/g, "[local path]"),
+  );
 }
 
 function truncateNotificationText(text: string): string {
@@ -40,7 +72,11 @@ function truncateNotificationText(text: string): string {
 }
 
 function stripMarkdownEmphasis(text: string): string {
-  return text.replace(/\*\*([^*]+)\*\*/g, "$1").trim();
+  return text
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .trim();
 }
 
 function sanitizeHeaderFragment(fragment: string | undefined): string | undefined {
@@ -48,7 +84,7 @@ function sanitizeHeaderFragment(fragment: string | undefined): string | undefine
     return undefined;
   }
 
-  const sanitized = sanitizeNotificationText(fragment);
+  const sanitized = sanitizeNotificationText(fragment).replace(/\s+/g, " ").trim();
   return sanitized || undefined;
 }
 
@@ -98,6 +134,106 @@ function hasExplicitValidationSuccess(lines: string[]): boolean {
   });
 }
 
+function isStandaloneSectionHeading(line: string): boolean {
+  return /^(summary|findings?|details?|notes?|status|validation|checks?|outcome|review|results?|next steps?)[:]?$/.test(
+    line.trim().toLowerCase(),
+  );
+}
+
+function stripMarkdownLinePrefix(line: string): string {
+  return line
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/^>\s?/, "")
+    .replace(/^[-*+]\s+/, "")
+    .replace(/^\[[ xX]\]\s+/, "")
+    .replace(/^\d+[.)]\s+/, "")
+    .trim();
+}
+
+function truncateSummaryItem(text: string): string {
+  if (text.length <= MAX_SUMMARY_ITEM_LENGTH) {
+    return text;
+  }
+
+  const sentenceMatch = text.match(/^(.+?[.!?])(?:\s|$)/);
+  if (sentenceMatch?.[1] && sentenceMatch[1].length <= MAX_SUMMARY_ITEM_LENGTH) {
+    return sentenceMatch[1];
+  }
+
+  return `${text.slice(0, MAX_SUMMARY_ITEM_LENGTH - 1).trimEnd()}…`;
+}
+
+function extractSummaryItem(line: string): string | undefined {
+  const withoutEmphasis = stripMarkdownEmphasis(line);
+  const withoutPrefix = stripMarkdownLinePrefix(withoutEmphasis);
+  const withoutLabel = withoutPrefix.replace(/^Summary:\s*/i, "").trim();
+  const sanitized = sanitizeNotificationText(withoutLabel).replace(/\s+/g, " ").trim();
+
+  if (!sanitized) {
+    return undefined;
+  }
+
+  if (/^[A-Za-z0-9_.-]+:$/.test(sanitized)) {
+    return undefined;
+  }
+
+  if (isStandaloneSectionHeading(sanitized)) {
+    return undefined;
+  }
+
+  return truncateSummaryItem(sanitized);
+}
+
+function renderSummaryItems(items: string[]): string {
+  if (items.length === 0) {
+    return "";
+  }
+
+  if (items.length === 1) {
+    return items[0];
+  }
+
+  return items.map((item) => `• ${item}`).join("\n");
+}
+
+function buildConciseSummary(lines: string[]): string {
+  const meaningfulLines = lines.filter((line) => {
+    const trimmed = line.trim();
+    return trimmed.length > 0 && !isStandaloneSectionHeading(stripMarkdownLinePrefix(stripMarkdownEmphasis(trimmed)));
+  });
+
+  if (meaningfulLines.length === 1) {
+    const single = meaningfulLines[0]
+      .replace(/^Summary:\s*/i, "")
+      .trim();
+    return sanitizeNotificationText(stripMarkdownLinePrefix(stripMarkdownEmphasis(single)));
+  }
+
+  const items: string[] = [];
+  const seen = new Set<string>();
+
+  for (const line of lines) {
+    const item = extractSummaryItem(line);
+    if (!item) {
+      continue;
+    }
+
+    const key = item.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+
+    items.push(item);
+    seen.add(key);
+
+    if (items.length >= MAX_SUMMARY_ITEMS) {
+      break;
+    }
+  }
+
+  return renderSummaryItems(items);
+}
+
 function summarizeSubagentContent(rawContent: string): {
   status?: "completed" | "failed" | "paused" | "partial";
   agent?: string;
@@ -116,11 +252,6 @@ function summarizeSubagentContent(rawContent: string): {
     .filter((line) => !/^Output saved to:/i.test(line))
     .filter((line) => !/^Session file:/i.test(line))
     .filter((line) => !/^Read this file if needed\.?$/i.test(line));
-
-  const explicitSummary = summaryLines
-    .find((line) => /^Summary:\s*/i.test(line))
-    ?.replace(/^Summary:\s*/i, "")
-    .trim();
 
   const agentLabels = summaryLines
     .filter((line) => /^[A-Za-z0-9_.-]+:$/.test(line))
@@ -154,10 +285,7 @@ function summarizeSubagentContent(rawContent: string): {
     };
   }
 
-  const substantiveLines = summaryLines
-    .filter((line) => !/^[A-Za-z0-9_.-]+:$/.test(line))
-    .filter((line) => !/^Summary:\s*/i.test(line));
-  let body = sanitizeNotificationText(explicitSummary ?? substantiveLines.join("\n"));
+  let body = buildConciseSummary(summaryLines);
 
   if (!body && status === "completed" && agentLabels.length > 0) {
     const uniqueLabels = [...new Set(agentLabels)];

@@ -176,6 +176,37 @@ describe("formatNotification", () => {
     );
   });
 
+  it("keeps multi-line async summaries compact and readable", () => {
+    const entry = makeCustomMessageEntry(
+      "subagent-notify",
+      true,
+      undefined,
+      [
+        "Background task completed: **worker**",
+        "## Summary",
+        "- Tightened the Telegram notification layout.",
+        "- Trimmed verbose async summaries down to the essentials.",
+        "- Added focused regression tests.",
+        "- Left extra implementation notes in the saved artifact.",
+      ].join("\n"),
+    );
+
+    expect(formatNotification(entry)).toBe(
+      [
+        "✅ Background task completed: worker",
+        "• Tightened the Telegram notification layout.",
+        "• Trimmed verbose async summaries down to the essentials.",
+        "• Added focused regression tests.",
+      ].join("\n"),
+    );
+  });
+
+  it("preserves line breaks while sanitizing notification text", () => {
+    expect(sanitizeNotificationText("First line\n\nSee /Users/me/project/secret.txt\nThird line")).toBe(
+      "First line\n\nSee [local path]\nThird line",
+    );
+  });
+
   it("distinguishes useful work that failed while finalizing from task failure", () => {
     const entry = makeCustomMessageEntry(
       "subagent-notify",
