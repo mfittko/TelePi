@@ -10,7 +10,31 @@ export { formatNotification, sanitizeNotificationText };
 
 type TailBuffer = Buffer<ArrayBufferLike>;
 
+type AsyncRunStatusStep = {
+  agent?: string;
+  status?: string;
+  recentOutput?: string[];
+  sessionFile?: string;
+};
+
+type AsyncRunStatus = {
+  runId?: string;
+  state?: string;
+  mode?: string;
+  endedAt?: number;
+  sessionId?: string;
+  cwd?: string;
+  steps?: AsyncRunStatusStep[];
+};
+
+type AsyncRunStatusCacheEntry = {
+  mtimeMs: number;
+  status?: AsyncRunStatus;
+};
+
 const MAX_SUMMARY_OUTPUT_BYTES = 128 * 1024;
+const ASYNC_STATUS_POLL_INTERVAL_MS = 3000;
+const ASYNC_COMPLETION_GRACE_MS = 1500;
 
 /**
  * Custom message types that are forwarded as Telegram notifications.
@@ -121,9 +145,20 @@ function isInsidePath(child: string, parent: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-function getOutputSummaryAllowedRoots(): string[] {
-  const roots = [getAsyncRunBaseDir(), path.join(process.cwd(), "reviews")];
-  return roots.flatMap((root) => {
+function getConfiguredReviewRoots(): string[] {
+  const roots = [path.join(process.cwd(), "reviews")];
+  const configuredWorkspace = process.env.TELEPI_WORKSPACE?.trim();
+
+  if (configuredWorkspace) {
+    roots.push(path.resolve(configuredWorkspace, "reviews"));
+  }
+
+  return roots;
+}
+
+function getOutputSummaryAllowedRoots(additionalRoots: string[] = []): string[] {
+  const roots = [getAsyncRunBaseDir(), ...getConfiguredReviewRoots(), ...additionalRoots];
+  return [...new Set(roots)].flatMap((root) => {
     try {
       return [realpathSync(root)];
     } catch {
@@ -162,17 +197,7 @@ function sanitizeOutputSummary(summary: string): string {
     .trim();
 }
 
-function summarizeReferencedOutputs(files: string[]): string | undefined {
-  const allowedRoots = getOutputSummaryAllowedRoots();
-  if (allowedRoots.length === 0) {
-    return undefined;
-  }
-
-  const contents = files.flatMap((file) => {
-    const content = readSafeSummaryOutput(file, allowedRoots);
-    return content === undefined ? [] : [content];
-  });
-
+function summarizeReviewContents(contents: string[]): string | undefined {
   if (contents.length === 0) {
     return undefined;
   }
@@ -211,6 +236,20 @@ function summarizeReferencedOutputs(files: string[]): string | undefined {
   }
 
   return "No blockers found in the returned reviews.";
+}
+
+function summarizeReferencedOutputs(files: string[], additionalAllowedRoots: string[] = []): string | undefined {
+  const allowedRoots = getOutputSummaryAllowedRoots(additionalAllowedRoots);
+  if (allowedRoots.length === 0) {
+    return undefined;
+  }
+
+  const contents = files.flatMap((file) => {
+    const content = readSafeSummaryOutput(file, allowedRoots);
+    return content === undefined ? [] : [content];
+  });
+
+  return summarizeReviewContents(contents);
 }
 
 function findAsyncStatusForSession(sessionFile: string): { error?: string; state?: string } | undefined {
@@ -304,6 +343,149 @@ function enrichNotificationEntry(entry: CustomMessageEntry): CustomMessageEntry 
   };
 }
 
+function readAsyncRunStatus(statusPath: string): AsyncRunStatus | undefined {
+  try {
+    return JSON.parse(readFileSync(statusPath, "utf8")) as AsyncRunStatus;
+  } catch {
+    return undefined;
+  }
+}
+
+function buildAsyncRunAgentLabel(status: AsyncRunStatus): string | undefined {
+  const agents = status.steps?.map((step) => step.agent).filter((agent): agent is string => Boolean(agent)) ?? [];
+  if (agents.length === 0) {
+    return undefined;
+  }
+
+  return status.mode === "parallel" && agents.length > 1
+    ? `parallel:${agents.join("+")}`
+    : agents[0];
+}
+
+function hasExistingActionableEntryForAsyncRun(entries: SessionEntry[], status: AsyncRunStatus): boolean {
+  const stepSessionFiles = new Set(
+    status.steps
+      ?.map((step) => step.sessionFile)
+      .filter((sessionFile): sessionFile is string => Boolean(sessionFile)) ?? [],
+  );
+
+  if (stepSessionFiles.size === 0) {
+    return false;
+  }
+
+  return entries.some((entry) => {
+    if (!isActionableCustomMessageEntry(entry) || typeof entry.content !== "string") {
+      return false;
+    }
+
+    const content = entry.content;
+    return [...stepSessionFiles].some((sessionFile) => content.includes(sessionFile));
+  });
+}
+
+function buildSyntheticAsyncCompletionEntry(status: AsyncRunStatus, entries: SessionEntry[]): CustomMessageEntry | undefined {
+  if (!status.runId || !status.sessionId) {
+    return undefined;
+  }
+
+  if (status.state !== "complete" && status.state !== "failed" && status.state !== "paused") {
+    return undefined;
+  }
+
+  const endedAt = typeof status.endedAt === "number" ? status.endedAt : undefined;
+  if (endedAt && Date.now() - endedAt < ASYNC_COMPLETION_GRACE_MS) {
+    return undefined;
+  }
+
+  if (hasExistingActionableEntryForAsyncRun(entries, status)) {
+    return undefined;
+  }
+
+  const agentLabel = buildAsyncRunAgentLabel(status);
+  if (!agentLabel) {
+    return undefined;
+  }
+
+  const summary = summarizeReviewContents(
+    status.steps
+      ?.flatMap((step) => step.recentOutput ?? [])
+      .map((line) => line.trim())
+      .filter(Boolean) ?? [],
+  );
+  const sessionLine = status.steps?.find((step) => step.sessionFile)?.sessionFile;
+  const header = `Background task ${status.state === "complete" ? "completed" : status.state}: **${agentLabel}**`;
+
+  return {
+    type: "custom_message",
+    id: `async-status:${status.runId}`,
+    parentId: null,
+    timestamp: new Date(endedAt ?? Date.now()).toISOString(),
+    customType: "subagent-notify",
+    content: [
+      header,
+      summary ? "" : undefined,
+      summary ? `Summary: ${summary}` : undefined,
+      sessionLine ? "" : undefined,
+      sessionLine ? `Session file: ${sessionLine}` : undefined,
+    ]
+      .filter((line): line is string => line !== undefined)
+      .join("\n"),
+    display: true,
+    details: {
+      status: status.state === "complete" ? "completed" : status.state,
+      source: "async-status",
+      runId: status.runId,
+    },
+  };
+}
+
+function collectSyntheticAsyncCompletionEntries(
+  sessionIdentity: string,
+  entries: SessionEntry[],
+  statusCache: Map<string, AsyncRunStatusCacheEntry>,
+): CustomMessageEntry[] {
+  const baseDir = getAsyncRunBaseDir();
+  if (!existsSync(baseDir)) {
+    statusCache.clear();
+    return [];
+  }
+
+  const statusPaths = readdirSync(baseDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(baseDir, entry.name, "status.json"))
+    .filter((statusPath) => existsSync(statusPath));
+  const liveStatusPaths = new Set(statusPaths);
+
+  for (const cachedPath of statusCache.keys()) {
+    if (!liveStatusPaths.has(cachedPath)) {
+      statusCache.delete(cachedPath);
+    }
+  }
+
+  return statusPaths.flatMap((statusPath) => {
+    let mtimeMs: number;
+    try {
+      mtimeMs = statSync(statusPath).mtimeMs;
+    } catch {
+      statusCache.delete(statusPath);
+      return [];
+    }
+
+    const cached = statusCache.get(statusPath);
+    const status = cached?.mtimeMs === mtimeMs ? cached.status : readAsyncRunStatus(statusPath);
+    if (!cached || cached.mtimeMs !== mtimeMs) {
+      statusCache.set(statusPath, { mtimeMs, status });
+    }
+
+    if (!status || status.sessionId !== sessionIdentity) {
+      return [];
+    }
+
+    const syntheticEntry = buildSyntheticAsyncCompletionEntry(status, entries);
+    return syntheticEntry ? [syntheticEntry] : [];
+  });
+}
+
 /**
  * Attempt to deliver a single notification entry.
  *
@@ -369,7 +551,27 @@ export function createSessionNotificationWatcher(
   let fileOffset = 0;
   let tailBytes: TailBuffer = Buffer.alloc(0) as TailBuffer;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let asyncStatusPoller: ReturnType<typeof setInterval> | undefined;
   let disposed = false;
+  const asyncStatusCache = new Map<string, AsyncRunStatusCacheEntry>();
+
+  const deliverActionableEntries = (): void => {
+    for (const entry of session.sessionManager.getEntries()) {
+      if (isActionableCustomMessageEntry(entry)) {
+        tryDeliverEntry(entry, isAlreadySeen, markSeen, send, inFlight, scheduleRetry);
+      }
+    }
+  };
+
+  const deliverSyntheticAsyncCompletions = (): void => {
+    if (!sessionFile) {
+      return;
+    }
+
+    for (const entry of collectSyntheticAsyncCompletionEntries(sessionFile, session.sessionManager.getEntries(), asyncStatusCache)) {
+      tryDeliverEntry(entry, isAlreadySeen, markSeen, send, inFlight, scheduleRetry);
+    }
+  };
 
   const scheduleRetry = (): void => {
     if (disposed || retryTimer !== undefined) {
@@ -380,11 +582,8 @@ export function createSessionNotificationWatcher(
       if (disposed) {
         return;
       }
-      for (const entry of session.sessionManager.getEntries()) {
-        if (isActionableCustomMessageEntry(entry)) {
-          tryDeliverEntry(entry, isAlreadySeen, markSeen, send, inFlight, scheduleRetry);
-        }
-      }
+      deliverActionableEntries();
+      deliverSyntheticAsyncCompletions();
     }, 5000);
   };
 
@@ -399,11 +598,8 @@ export function createSessionNotificationWatcher(
     : 0;
 
   // Catch-up: deliver any actionable notifications already in the session.
-  for (const entry of session.sessionManager.getEntries()) {
-    if (isActionableCustomMessageEntry(entry)) {
-      tryDeliverEntry(entry, isAlreadySeen, markSeen, send, inFlight, scheduleRetry);
-    }
-  }
+  deliverActionableEntries();
+  deliverSyntheticAsyncCompletions();
 
   fileOffset = initialFileSize;
 
@@ -434,6 +630,14 @@ export function createSessionNotificationWatcher(
   if (sessionFile && drainFile) {
     watchFile(sessionFile, { interval: 1000 }, drainFile);
     drainFile();
+
+    asyncStatusPoller = setInterval(() => {
+      if (disposed) {
+        return;
+      }
+      deliverSyntheticAsyncCompletions();
+    }, ASYNC_STATUS_POLL_INTERVAL_MS);
+    asyncStatusPoller.unref?.();
   }
 
   // Live watch: deliver future actionable custom messages emitted in this process.
@@ -460,18 +664,44 @@ export function createSessionNotificationWatcher(
     }
 
     const entries = session.sessionManager.getEntries();
+    const messageTimestamp = typeof message.timestamp === "number"
+      ? new Date(message.timestamp).toISOString()
+      : undefined;
+    let newestUndeliveredMatch: CustomMessageEntry | undefined;
+
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i];
-      if (entry.type === "custom_message" && (entry as CustomMessageEntry).customType === message.customType) {
-        if (isActionableCustomMessageEntry(entry)) {
-          tryDeliverEntry(entry, isAlreadySeen, markSeen, send, inFlight, scheduleRetry);
-        }
+      if (entry.type !== "custom_message" || (entry as CustomMessageEntry).customType !== message.customType) {
+        continue;
+      }
+
+      if (!isActionableCustomMessageEntry(entry)) {
+        continue;
+      }
+
+      if (messageTimestamp && entry.timestamp === messageTimestamp) {
+        tryDeliverEntry(entry, isAlreadySeen, markSeen, send, inFlight, scheduleRetry);
         return;
       }
+
+      if (!newestUndeliveredMatch && !isAlreadySeen(entry.id)) {
+        newestUndeliveredMatch = entry;
+      }
+    }
+
+    if (newestUndeliveredMatch) {
+      tryDeliverEntry(newestUndeliveredMatch, isAlreadySeen, markSeen, send, inFlight, scheduleRetry);
+      return;
     }
 
     if (drainFile) {
       drainFile();
+      return;
+    }
+
+    const fallbackContent = typeof message.content === "string" ? message.content.trim() : "";
+    const hasFallbackDetails = Boolean(message.details && typeof message.details === "object");
+    if (!fallbackContent && !hasFallbackDetails) {
       return;
     }
 
@@ -482,7 +712,7 @@ export function createSessionNotificationWatcher(
       parentId: null,
       timestamp: new Date(message.timestamp ?? Date.now()).toISOString(),
       customType: message.customType,
-      content: typeof message.content === "string" ? message.content : "",
+      content: fallbackContent,
       display: true,
       details: message.details,
     };
@@ -494,6 +724,10 @@ export function createSessionNotificationWatcher(
     if (retryTimer !== undefined) {
       clearTimeout(retryTimer);
       retryTimer = undefined;
+    }
+    if (asyncStatusPoller !== undefined) {
+      clearInterval(asyncStatusPoller);
+      asyncStatusPoller = undefined;
     }
     unsubscribeSession();
     if (sessionFile && drainFile) {

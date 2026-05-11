@@ -74,10 +74,11 @@ function makeSessionEntry(overrides: Partial<SessionEntry> = {}): SessionEntry {
   } as SessionEntry;
 }
 
-function makeMockSession(entries: SessionEntry[] = []) {
+function makeMockSession(entries: SessionEntry[] = [], sessionFile?: string) {
   const subscribers: Array<(event: any) => void> = [];
 
   return {
+    sessionFile,
     sessionManager: {
       getEntries: vi.fn(() => [...entries]),
     },
@@ -173,6 +174,37 @@ describe("formatNotification", () => {
 
     expect(formatNotification(entry)).toBe(
       "✅ Background task completed: 3 reviewers\nOne blocker remains: bootstrap attach can race. Everything else reviewed well.",
+    );
+  });
+
+  it("keeps multi-line async summaries compact and readable", () => {
+    const entry = makeCustomMessageEntry(
+      "subagent-notify",
+      true,
+      undefined,
+      [
+        "Background task completed: **worker**",
+        "## Summary",
+        "- Tightened the Telegram notification layout.",
+        "- Trimmed verbose async summaries down to the essentials.",
+        "- Added focused regression tests.",
+        "- Left extra implementation notes in the saved artifact.",
+      ].join("\n"),
+    );
+
+    expect(formatNotification(entry)).toBe(
+      [
+        "✅ Background task completed: worker",
+        "• Tightened the Telegram notification layout.",
+        "• Trimmed verbose async summaries down to the essentials.",
+        "• Added focused regression tests.",
+      ].join("\n"),
+    );
+  });
+
+  it("preserves line breaks while sanitizing notification text", () => {
+    expect(sanitizeNotificationText("First line\n\nSee /Users/me/project/secret.txt\nThird line")).toBe(
+      "First line\n\nSee [local path]\nThird line",
     );
   });
 
@@ -465,6 +497,47 @@ describe("createSessionNotificationWatcher — file tail robustness", () => {
     }
   });
 
+  it("summarizes review outputs from TELEPI_WORKSPACE/reviews in installed mode", async () => {
+    const previousWorkspace = process.env.TELEPI_WORKSPACE;
+    const workspaceDir = mkdtempSync(path.join(tmpdir(), "telepi-workspace-"));
+    const reviewsDir = path.join(workspaceDir, "reviews");
+    mkdirSync(reviewsDir, { recursive: true });
+    const outputFile = path.join(reviewsDir, "review.md");
+    writeFileSync(outputFile, "## Review\n- Blocker: installed launchd mode still misses the workspace review root.\n", "utf8");
+    process.env.TELEPI_WORKSPACE = workspaceDir;
+
+    try {
+      const entry = makeCustomMessageEntry(
+        "subagent-notify",
+        true,
+        undefined,
+        [
+          "Background task completed: **reviewer**",
+          `Output saved to: ${outputFile} (1 KB, 2 lines). Read this file if needed.`,
+          "Session file: /tmp/nonexistent-child-session.jsonl",
+        ].join("\n"),
+        "workspace-output-summary-entry",
+      );
+      const session = makeMockSession([entry]);
+      const send = vi.fn().mockResolvedValue(undefined);
+      const seen = new Set<string>();
+
+      createSessionNotificationWatcher(session as any, (id) => seen.has(id), (id) => seen.add(id), send);
+      await Promise.resolve();
+
+      expect(send).toHaveBeenCalledWith(
+        "✅ Background task completed: reviewer\nOne blocker remains: installed launchd mode still misses the workspace review root. Everything else reviewed well.",
+      );
+    } finally {
+      if (previousWorkspace === undefined) {
+        delete process.env.TELEPI_WORKSPACE;
+      } else {
+        process.env.TELEPI_WORKSPACE = previousWorkspace;
+      }
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
   it("does not summarize output files outside allowed roots", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "telepi-output-unsafe-"));
     const outputFile = path.join(dir, "review.md");
@@ -612,6 +685,133 @@ describe("createSessionNotificationWatcher — file tail robustness", () => {
       rmSync(oldRunDir, { recursive: true, force: true });
       rmSync(newRunDir, { recursive: true, force: true });
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("synthesizes an async completion notification from background run status when no custom message was appended", async () => {
+    const parentSessionFile = path.join(tmpdir(), `telepi-parent-${Date.now()}.jsonl`);
+    const asyncBase = path.join(
+      tmpdir(),
+      `pi-subagents-uid-${typeof process.getuid === "function" ? process.getuid() : "undefined"}`,
+      "async-subagent-runs",
+    );
+    mkdirSync(asyncBase, { recursive: true });
+    const runDir = mkdtempSync(path.join(asyncBase, "telepi-async-status-"));
+
+    try {
+      writeFileSync(parentSessionFile, "", "utf8");
+      writeFileSync(
+        path.join(runDir, "status.json"),
+        JSON.stringify({
+          runId: "run-123",
+          sessionId: parentSessionFile,
+          mode: "parallel",
+          state: "complete",
+          endedAt: Date.now() - 5_000,
+          steps: [
+            {
+              agent: "reviewer",
+              status: "complete",
+              sessionFile: path.join(runDir, "child-0.jsonl"),
+              recentOutput: [
+                "## Review",
+                "- Blocker: installed mode still misses the async summary notification.",
+              ],
+            },
+            {
+              agent: "reviewer",
+              status: "complete",
+              sessionFile: path.join(runDir, "child-1.jsonl"),
+              recentOutput: ["## Review", "- Correct: tests cover the happy path."],
+            },
+          ],
+        }),
+        "utf8",
+      );
+
+      const session = makeMockSession([], parentSessionFile);
+      const send = vi.fn().mockResolvedValue(undefined);
+      const seen = new Set<string>();
+
+      const unsubscribe = createSessionNotificationWatcher(
+        session as any,
+        (id) => seen.has(id),
+        (id) => seen.add(id),
+        send,
+      );
+      await Promise.resolve();
+
+      expect(send).toHaveBeenCalledWith(
+        "✅ Background task completed: 2 reviewers\nOne blocker remains: installed mode still misses the async summary notification. Everything else reviewed well.",
+      );
+
+      unsubscribe();
+    } finally {
+      rmSync(runDir, { recursive: true, force: true });
+      rmSync(parentSessionFile, { force: true });
+    }
+  });
+
+  it("reuses cached async run status for unchanged poll ticks", async () => {
+    vi.useFakeTimers();
+    const parentSessionFile = path.join(tmpdir(), `telepi-parent-${Date.now()}.jsonl`);
+    const asyncBase = path.join(
+      tmpdir(),
+      `pi-subagents-uid-${typeof process.getuid === "function" ? process.getuid() : "undefined"}`,
+      "async-subagent-runs",
+    );
+    mkdirSync(asyncBase, { recursive: true });
+    const runDir = mkdtempSync(path.join(asyncBase, "telepi-async-status-"));
+    const statusPath = path.join(runDir, "status.json");
+
+    try {
+      writeFileSync(parentSessionFile, "", "utf8");
+      writeFileSync(
+        statusPath,
+        JSON.stringify({
+          runId: "run-cached",
+          sessionId: parentSessionFile,
+          mode: "single",
+          state: "complete",
+          endedAt: Date.now() - 5_000,
+          steps: [
+            {
+              agent: "reviewer",
+              status: "complete",
+              sessionFile: path.join(runDir, "child-0.jsonl"),
+              recentOutput: ["## Review", "- Correct: unchanged status should be cached."],
+            },
+          ],
+        }),
+        "utf8",
+      );
+
+      const readFileSpy = vi.spyOn(fs, "readFileSync");
+      const session = makeMockSession([], parentSessionFile);
+      const send = vi.fn().mockResolvedValue(undefined);
+      const seen = new Set<string>();
+
+      const unsubscribe = createSessionNotificationWatcher(
+        session as any,
+        (id) => seen.has(id),
+        (id) => seen.add(id),
+        send,
+      );
+      await Promise.resolve();
+
+      const initialStatusReads = readFileSpy.mock.calls.filter(([filePath]) => filePath === statusPath).length;
+
+      await vi.advanceTimersByTimeAsync(6_000);
+      await Promise.resolve();
+
+      expect(send).toHaveBeenCalledOnce();
+      expect(initialStatusReads).toBeGreaterThan(0);
+      expect(readFileSpy.mock.calls.filter(([filePath]) => filePath === statusPath)).toHaveLength(initialStatusReads);
+
+      unsubscribe();
+    } finally {
+      rmSync(runDir, { recursive: true, force: true });
+      rmSync(parentSessionFile, { force: true });
     }
   });
 
@@ -790,6 +990,37 @@ describe("createSessionNotificationWatcher — live events", () => {
     expect(send).toHaveBeenCalledWith(
       "⏸ Background task paused: live-agent\nWaiting for user input to continue.",
     );
+  });
+
+  it("falls back to a synthetic live notification when only an older seen entry is present", () => {
+    const oldEntry = makeCustomMessageEntry(
+      "subagent-notify",
+      true,
+      { status: "completed", agent: "live-agent" },
+      "Old notification already delivered.",
+      "entry-old",
+    );
+    const session = makeMockSession([oldEntry]);
+    const send = vi.fn().mockResolvedValue(undefined);
+    const seen = new Set<string>(["entry-old"]);
+
+    createSessionNotificationWatcher(session as any, (id) => seen.has(id), (id) => seen.add(id), send);
+    send.mockClear();
+
+    const timestamp = Date.now();
+    session.emit({
+      type: "message_end",
+      message: {
+        role: "custom",
+        customType: "subagent-notify",
+        display: true,
+        timestamp,
+        content: "Fresh notification body.",
+      },
+    });
+
+    expect(send).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledWith("🔔 Subagent notification\nFresh notification body.");
   });
 
   it("ignores non-custom message_end events", () => {
