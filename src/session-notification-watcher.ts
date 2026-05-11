@@ -27,6 +27,11 @@ type AsyncRunStatus = {
   steps?: AsyncRunStatusStep[];
 };
 
+type AsyncRunStatusCacheEntry = {
+  mtimeMs: number;
+  status?: AsyncRunStatus;
+};
+
 const MAX_SUMMARY_OUTPUT_BYTES = 128 * 1024;
 const ASYNC_STATUS_POLL_INTERVAL_MS = 3000;
 const ASYNC_COMPLETION_GRACE_MS = 1500;
@@ -434,24 +439,51 @@ function buildSyntheticAsyncCompletionEntry(status: AsyncRunStatus, entries: Ses
   };
 }
 
-function collectSyntheticAsyncCompletionEntries(sessionIdentity: string, entries: SessionEntry[]): CustomMessageEntry[] {
+function collectSyntheticAsyncCompletionEntries(
+  sessionIdentity: string,
+  entries: SessionEntry[],
+  statusCache: Map<string, AsyncRunStatusCacheEntry>,
+): CustomMessageEntry[] {
   const baseDir = getAsyncRunBaseDir();
   if (!existsSync(baseDir)) {
+    statusCache.clear();
     return [];
   }
 
-  return readdirSync(baseDir, { withFileTypes: true })
+  const statusPaths = readdirSync(baseDir, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => path.join(baseDir, entry.name, "status.json"))
-    .flatMap((statusPath) => {
-      const status = readAsyncRunStatus(statusPath);
-      if (!status || status.sessionId !== sessionIdentity) {
-        return [];
-      }
+    .filter((statusPath) => existsSync(statusPath));
+  const liveStatusPaths = new Set(statusPaths);
 
-      const syntheticEntry = buildSyntheticAsyncCompletionEntry(status, entries);
-      return syntheticEntry ? [syntheticEntry] : [];
-    });
+  for (const cachedPath of statusCache.keys()) {
+    if (!liveStatusPaths.has(cachedPath)) {
+      statusCache.delete(cachedPath);
+    }
+  }
+
+  return statusPaths.flatMap((statusPath) => {
+    let mtimeMs: number;
+    try {
+      mtimeMs = statSync(statusPath).mtimeMs;
+    } catch {
+      statusCache.delete(statusPath);
+      return [];
+    }
+
+    const cached = statusCache.get(statusPath);
+    const status = cached?.mtimeMs === mtimeMs ? cached.status : readAsyncRunStatus(statusPath);
+    if (!cached || cached.mtimeMs !== mtimeMs) {
+      statusCache.set(statusPath, { mtimeMs, status });
+    }
+
+    if (!status || status.sessionId !== sessionIdentity) {
+      return [];
+    }
+
+    const syntheticEntry = buildSyntheticAsyncCompletionEntry(status, entries);
+    return syntheticEntry ? [syntheticEntry] : [];
+  });
 }
 
 /**
@@ -521,6 +553,7 @@ export function createSessionNotificationWatcher(
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let asyncStatusPoller: ReturnType<typeof setInterval> | undefined;
   let disposed = false;
+  const asyncStatusCache = new Map<string, AsyncRunStatusCacheEntry>();
 
   const deliverActionableEntries = (): void => {
     for (const entry of session.sessionManager.getEntries()) {
@@ -535,7 +568,7 @@ export function createSessionNotificationWatcher(
       return;
     }
 
-    for (const entry of collectSyntheticAsyncCompletionEntries(sessionFile, session.sessionManager.getEntries())) {
+    for (const entry of collectSyntheticAsyncCompletionEntries(sessionFile, session.sessionManager.getEntries(), asyncStatusCache)) {
       tryDeliverEntry(entry, isAlreadySeen, markSeen, send, inFlight, scheduleRetry);
     }
   };

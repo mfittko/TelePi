@@ -752,6 +752,69 @@ describe("createSessionNotificationWatcher — file tail robustness", () => {
     }
   });
 
+  it("reuses cached async run status for unchanged poll ticks", async () => {
+    vi.useFakeTimers();
+    const parentSessionFile = path.join(tmpdir(), `telepi-parent-${Date.now()}.jsonl`);
+    const asyncBase = path.join(
+      tmpdir(),
+      `pi-subagents-uid-${typeof process.getuid === "function" ? process.getuid() : "undefined"}`,
+      "async-subagent-runs",
+    );
+    mkdirSync(asyncBase, { recursive: true });
+    const runDir = mkdtempSync(path.join(asyncBase, "telepi-async-status-"));
+    const statusPath = path.join(runDir, "status.json");
+
+    try {
+      writeFileSync(parentSessionFile, "", "utf8");
+      writeFileSync(
+        statusPath,
+        JSON.stringify({
+          runId: "run-cached",
+          sessionId: parentSessionFile,
+          mode: "single",
+          state: "complete",
+          endedAt: Date.now() - 5_000,
+          steps: [
+            {
+              agent: "reviewer",
+              status: "complete",
+              sessionFile: path.join(runDir, "child-0.jsonl"),
+              recentOutput: ["## Review", "- Correct: unchanged status should be cached."],
+            },
+          ],
+        }),
+        "utf8",
+      );
+
+      const readFileSpy = vi.spyOn(fs, "readFileSync");
+      const session = makeMockSession([], parentSessionFile);
+      const send = vi.fn().mockResolvedValue(undefined);
+      const seen = new Set<string>();
+
+      const unsubscribe = createSessionNotificationWatcher(
+        session as any,
+        (id) => seen.has(id),
+        (id) => seen.add(id),
+        send,
+      );
+      await Promise.resolve();
+
+      const initialStatusReads = readFileSpy.mock.calls.filter(([filePath]) => filePath === statusPath).length;
+
+      await vi.advanceTimersByTimeAsync(6_000);
+      await Promise.resolve();
+
+      expect(send).toHaveBeenCalledOnce();
+      expect(initialStatusReads).toBeGreaterThan(0);
+      expect(readFileSpy.mock.calls.filter(([filePath]) => filePath === statusPath)).toHaveLength(initialStatusReads);
+
+      unsubscribe();
+    } finally {
+      rmSync(runDir, { recursive: true, force: true });
+      rmSync(parentSessionFile, { force: true });
+    }
+  });
+
   it("buffers partial JSONL appends until the line is complete", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "telepi-session-watch-"));
     const sessionFile = path.join(dir, "session.jsonl");
